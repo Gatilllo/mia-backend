@@ -1,5 +1,7 @@
 import os
 from typing import Optional, List
+from datetime import date as date_cls
+
 
 from fastapi import FastAPI, HTTPException, Path
 from pydantic import BaseModel
@@ -134,7 +136,42 @@ def update_notion_task(
     return UpdateNotionTaskResponse(task_id=taskId, updated_fields=updated_fields)
 
 from fastapi import Query
-from typing import Optional
+
+def _extract_title(prop):
+    title = prop.get("title")
+    if not title:
+        return None
+    return "".join([t.get("plain_text", "") for t in title])
+
+def _extract_select(prop):
+    select = prop.get("select")
+    if not select:
+        return None
+    return select.get("name")
+
+def _extract_number(prop):
+    return prop.get("number")
+
+def _extract_date(prop):
+    date_val = prop.get("date")
+    if not date_val:
+        return None
+    return date_val.get("start")
+
+def _page_to_task(page: dict) -> dict:
+    props = page.get("properties", {})
+    return {
+        "task_id": page.get("id"),
+        "task_title": _extract_title(props.get("Tarefa", {})),
+        "priority": _extract_select(props.get("Prioridade", {})),
+        "state": _extract_select(props.get("Estado", {})),
+        "planned_date": _extract_date(props.get("Data Planeada", {})),
+        "deadline": _extract_date(props.get("Deadline", {})),
+        "area_of_life": _extract_select(props.get("Área da Vida", {})),
+        "energy_level": _extract_select(props.get("Energia Necessária", {})),
+        "duration_minutes": _extract_number(props.get("Duração Estimada (min)", {})),
+        "url": page.get("url"),
+    }
 
 @app.get("/notion/tasks")
 async def query_tasks(
@@ -145,24 +182,106 @@ async def query_tasks(
     overdue: bool = False,
 ):
     """
-    Devolve tarefas da Task Hub 2.0 filtradas por:
-    - date      -> um dia específico
-    - from/to   -> intervalo de datas
-    - overdue   -> apenas atrasadas
+    Consulta tarefas na base Task Hub 2.0.
+
+    - Se `overdue` = true  -> tarefas atrasadas (Deadline < hoje, Estado != Concluído/Cancelado)
+    - Se `date` definido    -> tarefas desse dia (Data Planeada e/ou Deadline, consoante `scope`)
+    - Se `from`/`to`        -> intervalo de datas (Data Planeada e/ou Deadline)
     """
 
-    # TODO: aqui chamas a API do Notion como já fazes no create_task
-    # e aplicas os filtros de data/estado.
-    # Por agora devolve só um placeholder para confirmar que o endpoint está no ar:
+    try:
+        filter_obj = None
 
-    return {
-        "tasks": [],
-        "filters": {
-            "date": date,
-            "from": from_,
-            "to": to,
-            "scope": scope,
-            "overdue": overdue,
-        },
-    }
+        # 1) Tarefas atrasadas
+        if overdue:
+            today_str = date_cls.today().isoformat()
+            filter_obj = {
+                "and": [
+                    {
+                        "property": "Deadline",
+                        "date": {"before": today_str},
+                    },
+                    {
+                        "property": "Estado",
+                        "select": {"does_not_equal": "Concluído"},
+                    },
+                    {
+                        "property": "Estado",
+                        "select": {"does_not_equal": "Cancelado"},
+                    },
+                ]
+            }
 
+        # 2) Tarefas de um dia específico (ex.: hoje, amanhã)
+        elif date:
+            per_props = []
+            if scope in ("planned", "both"):
+                per_props.append(
+                    {
+                        "property": "Data Planeada",
+                        "date": {"equals": date},
+                    }
+                )
+            if scope in ("deadline", "both"):
+                per_props.append(
+                    {
+                        "property": "Deadline",
+                        "date": {"equals": date},
+                    }
+                )
+
+            if len(per_props) == 1:
+                filter_obj = per_props[0]
+            elif len(per_props) > 1:
+                filter_obj = {"or": per_props}
+
+        # 3) Intervalo de datas (ex.: esta semana)
+        elif from_ or to:
+            range_filters = []
+            if scope in ("planned", "both"):
+                cond = {"property": "Data Planeada", "date": {}}
+                if from_:
+                    cond["date"]["on_or_after"] = from_
+                if to:
+                    cond["date"]["on_or_before"] = to
+                range_filters.append(cond)
+            if scope in ("deadline", "both"):
+                cond = {"property": "Deadline", "date": {}}
+                if from_:
+                    cond["date"]["on_or_after"] = from_
+                if to:
+                    cond["date"]["on_or_before"] = to
+                range_filters.append(cond)
+
+            if len(range_filters) == 1:
+                filter_obj = range_filters[0]
+            elif len(range_filters) > 1:
+                filter_obj = {"or": range_filters}
+
+        # 4) Se não houver nenhum filtro explícito, devolve tarefas ativas (não concluídas/canceladas)
+        if filter_obj is None:
+            filter_obj = {
+                "and": [
+                    {
+                        "property": "Estado",
+                        "select": {"does_not_equal": "Concluído"},
+                    },
+                    {
+                        "property": "Estado",
+                        "select": {"does_not_equal": "Cancelado"},
+                    },
+                ]
+            }
+
+        # Chamada ao Notion
+        result = notion.databases.query(
+            database_id=NOTION_TASKS_DATABASE_ID,
+            filter=filter_obj,
+        )
+
+        tasks = [_page_to_task(page) for page in result.get("results", [])]
+
+        return {"tasks": tasks}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao consultar tarefas: {e}")
