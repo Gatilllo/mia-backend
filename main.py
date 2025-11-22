@@ -132,3 +132,37 @@ def update_notion_task(
     updated_fields = list(properties.keys())
 
     return UpdateNotionTaskResponse(task_id=taskId, updated_fields=updated_fields)
+
+from fastapi import Query
+from typing import Optional
+
+@app.get("/notion/tasks")
+async def query_tasks(
+    date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    from_: Optional[str] = Query(None, alias="from", description="YYYY-MM-DD"),
+    to: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    scope: str = Query("both", description="planned | deadline | both"),
+    overdue: bool = False,
+):
+    """
+    Devolve tarefas da Task Hub 2.0 filtradas por:
+    - date      -> um dia específico
+    - from/to   -> intervalo de datas
+    - overdue   -> apenas atrasadas
+    """
+
+    # TODO: aqui chamas a API do Notion como já fazes no create_task
+    # e aplicas os filtros de data/estado.
+    # Por agora devolve só um placeholder para confirmar que o endpoint está no ar:
+
+    return {
+        "tasks": [],
+        "filters": {
+            "date": date,
+            "from": from_,
+            "to": to,
+            "scope": scope,
+            "overdue": overdue,
+        },
+    }
+
