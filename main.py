@@ -285,3 +285,60 @@ async def query_tasks(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao consultar tarefas: {e}")
+
+from fastapi import FastAPI, Query
+from typing import List, Optional
+from datetime import date
+import notion_client
+
+app = FastAPI()
+
+NOTION_DATABASE_ID = "O_TEU_DATABASE_ID_AQUI"
+notion = notion_client.Client(auth="A_TUA_NOTION_API_KEY_AQUI")
+
+
+@app.get("/notion/tasks")
+def get_tasks_for_date(
+    target_date: date = Query(..., description="Data alvo no formato YYYY-MM-DD")
+):
+    """
+    Devolve todas as tarefas cuja Data Planeada OU Deadline sejam iguais à data indicada.
+    """
+    iso_date = target_date.isoformat()
+
+    # filtro Notion — adapta se na tua base estiver diferente
+    response = notion.databases.query(
+        database_id=NOTION_DATABASE_ID,
+        filter={
+            "or": [
+                {
+                    "property": "Data Planeada",
+                    "date": {"equals": iso_date},
+                },
+                {
+                    "property": "Deadline",
+                    "date": {"equals": iso_date},
+                },
+            ]
+        },
+    )
+
+    results = []
+    for page in response["results"]:
+        props = page["properties"]
+        title = props["Tarefa"]["title"][0]["plain_text"] if props["Tarefa"]["title"] else ""
+
+        planned = props["Data Planeada"]["date"]["start"] if props["Data Planeada"]["date"] else None
+        deadline = props["Deadline"]["date"]["start"] if props["Deadline"]["date"] else None
+
+        results.append(
+            {
+                "id": page["id"],
+                "title": title,
+                "planned": planned,
+                "deadline": deadline,
+            }
+        )
+
+    return {"tasks": results}
+
