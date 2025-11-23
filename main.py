@@ -11,6 +11,7 @@ load_dotenv()
 
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 NOTION_TASKS_DATABASE_ID = os.getenv("NOTION_TASKS_DATABASE_ID")
+NOTION_MOVIES_DATABASE_ID = os.getenv("NOTION_MOVIES_DATABASE_ID")
 
 if NOTION_API_KEY is None or NOTION_TASKS_DATABASE_ID is None:
     raise RuntimeError(
@@ -23,7 +24,9 @@ notion = NotionClient(auth=NOTION_API_KEY)
 app = FastAPI(title="Mia Notion API")
 
 
-# ---------- MODELOS ----------
+# ============================================================
+#                       MODELOS TASKS
+# ============================================================
 
 class CreateNotionTaskRequest(BaseModel):
     task_title: str
@@ -73,7 +76,112 @@ class QueryTasksResponse(BaseModel):
     tasks: List[TaskSummary]
 
 
-# ---------- HELPERS ----------
+# ============================================================
+#                       MODELOS FILMES
+# ============================================================
+
+class CreateMovieRequest(BaseModel):
+    movie_title: str
+    categories: Optional[List[str]] = None      # Multi-select
+    energy_required: Optional[str] = None       # Alta | Média | Baixa
+    mood: Optional[str] = None                  # Relaxar, Divertido, Intenso, etc.
+    duration: Optional[int] = None              # minutos
+    watched: Optional[bool] = None
+    watched_date: Optional[str] = None          # YYYY-MM-DD
+    rating: Optional[float] = None
+    notes: Optional[str] = None
+
+
+class CreateMovieResponse(BaseModel):
+    movie_id: str
+    url: Optional[str]
+
+
+class UpdateMovieRequest(BaseModel):
+    movie_title: Optional[str] = None
+    categories: Optional[List[str]] = None
+    energy_required: Optional[str] = None
+    mood: Optional[str] = None
+    duration: Optional[int] = None
+    watched: Optional[bool] = None
+    watched_date: Optional[str] = None
+    rating: Optional[float] = None
+    notes: Optional[str] = None
+
+
+class UpdateMovieResponse(BaseModel):
+    movie_id: str
+    updated_fields: List[str]
+
+
+class MovieSummary(BaseModel):
+    movie_id: str
+    movie_title: Optional[str] = None
+    categories: List[str] = []
+    energy_required: Optional[str] = None
+    mood: Optional[str] = None
+    duration: Optional[int] = None
+    watched: Optional[bool] = None
+    watched_date: Optional[str] = None
+    rating: Optional[float] = None
+    notes: Optional[str] = None
+    url: Optional[str] = None
+
+
+class QueryMoviesResponse(BaseModel):
+    movies: List[MovieSummary]
+
+
+# ============================================================
+#                          HELPERS COMUNS
+# ============================================================
+
+def _extract_title(prop: dict) -> Optional[str]:
+    title = prop.get("title")
+    if not title:
+        return None
+    return "".join(part.get("plain_text", "") for part in title)
+
+
+def _extract_select_name(prop: dict) -> Optional[str]:
+    sel = prop.get("select")
+    if not sel:
+        return None
+    return sel.get("name")
+
+
+def _extract_multi_select_names(prop: dict) -> List[str]:
+    ms = prop.get("multi_select")
+    if not ms:
+        return []
+    return [item.get("name", "") for item in ms]
+
+
+def _extract_date_start(prop: dict) -> Optional[str]:
+    date_val = prop.get("date")
+    if not date_val:
+        return None
+    return date_val.get("start")
+
+
+def _extract_number(prop: dict) -> Optional[int]:
+    return prop.get("number")
+
+
+def _extract_checkbox(prop: dict) -> Optional[bool]:
+    return prop.get("checkbox")
+
+
+def _extract_rich_text(prop: dict) -> Optional[str]:
+    rt = prop.get("rich_text")
+    if not rt:
+        return None
+    return "".join(part.get("plain_text", "") for part in rt)
+
+
+# ============================================================
+#                        HELPERS TASKS
+# ============================================================
 
 def build_notion_task_properties(body: CreateNotionTaskRequest):
     """
@@ -110,31 +218,6 @@ def build_notion_task_properties(body: CreateNotionTaskRequest):
     return props
 
 
-def _extract_title(prop: dict) -> Optional[str]:
-    title = prop.get("title")
-    if not title:
-        return None
-    return "".join(part.get("plain_text", "") for part in title)
-
-
-def _extract_select_name(prop: dict) -> Optional[str]:
-    sel = prop.get("select")
-    if not sel:
-        return None
-    return sel.get("name")
-
-
-def _extract_date_start(prop: dict) -> Optional[str]:
-    date_val = prop.get("date")
-    if not date_val:
-        return None
-    return date_val.get("start")
-
-
-def _extract_number(prop: dict) -> Optional[int]:
-    return prop.get("number")
-
-
 def page_to_task_summary(page: dict) -> TaskSummary:
     props = page.get("properties", {})
     return TaskSummary(
@@ -149,7 +232,71 @@ def page_to_task_summary(page: dict) -> TaskSummary:
     )
 
 
-# ---------- ENDPOINTS ----------
+# ============================================================
+#                        HELPERS FILMES
+# ============================================================
+
+def build_notion_movie_properties(body: CreateMovieRequest):
+    """
+    Constrói o dicionário de propriedades para a base Filmes Hub.
+    """
+    props = {
+        "Filme": {
+            "title": [{"text": {"content": body.movie_title}}],
+        }
+    }
+
+    if body.categories:
+        props["Categoria"] = {
+            "multi_select": [{"name": c} for c in body.categories]
+        }
+
+    if body.energy_required:
+        props["Energia Necessária"] = {
+            "select": {"name": body.energy_required}
+        }
+
+    if body.mood:
+        props["Mood Ideal"] = {"select": {"name": body.mood}}
+
+    if body.duration is not None:
+        props["Duração"] = {"number": body.duration}
+
+    if body.watched is not None:
+        props["Já Vi"] = {"checkbox": body.watched}
+
+    if body.watched_date:
+        props["Data Visto"] = {"date": {"start": body.watched_date}}
+
+    if body.rating is not None:
+        props["Avaliação"] = {"number": body.rating}
+
+    if body.notes:
+        props["Notas"] = {"rich_text": [{"text": {"content": body.notes}}]}
+
+    return props
+
+
+def page_to_movie_summary(page: dict) -> MovieSummary:
+    props = page.get("properties", {})
+    return MovieSummary(
+        movie_id=page.get("id"),
+        movie_title=_extract_title(props.get("Filme", {})),
+        categories=_extract_multi_select_names(props.get("Categoria", {})),
+        energy_required=_extract_select_name(props.get("Energia Necessária", {})),
+        mood=_extract_select_name(props.get("Mood Ideal", {})),
+        duration=_extract_number(props.get("Duração", {})),
+        watched=_extract_checkbox(props.get("Já Vi", {})),
+        watched_date=_extract_date_start(props.get("Data Visto", {})),
+        rating=_extract_number(props.get("Avaliação", {})),
+        notes=_extract_rich_text(props.get("Notas", {})),
+        url=page.get("url"),
+    )
+
+
+# ============================================================
+#                         ENDPOINTS TASKS
+# ============================================================
 
 @app.post("/notion/tasks", response_model=CreateNotionTaskResponse)
 def create_notion_task(body: CreateNotionTaskRequest):
@@ -187,18 +334,13 @@ def query_notion_tasks(
 ):
     """
     Consulta tarefas na Task Hub 2.0 filtradas por Data Planeada (principal) ou Deadline.
-
-    - Usa planned_date para perguntas do tipo "tarefas para hoje/amanhã/dia X".
-    - Usa deadline_date apenas para perguntas sobre prazos de conclusão.
     """
-
     if not planned_date and not deadline_date:
         raise HTTPException(
             status_code=400,
             detail="É necessário indicar planned_date ou deadline_date.",
         )
 
-    # Construção do filtro para o Notion
     if planned_date:
         filter_obj = {
             "property": "Data Planeada",
@@ -222,7 +364,6 @@ def query_notion_tasks(
         )
 
     tasks = [page_to_task_summary(page) for page in result.get("results", [])]
-
     return QueryTasksResponse(tasks=tasks)
 
 
@@ -290,5 +431,190 @@ def update_notion_task(
 
     return UpdateNotionTaskResponse(
         task_id=taskId,
+        updated_fields=list(properties.keys()),
+    )
+
+
+# ============================================================
+#                         ENDPOINTS FILMES
+# ============================================================
+
+@app.post("/notion/movies", response_model=CreateMovieResponse)
+def create_notion_movie(body: CreateMovieRequest):
+    """
+    Cria um novo filme na base Filmes Hub.
+    """
+    if NOTION_MOVIES_DATABASE_ID is None:
+        raise HTTPException(
+            status_code=500,
+            detail="NOTION_MOVIES_DATABASE_ID não está definido nas variáveis de ambiente.",
+        )
+
+    try:
+        props = build_notion_movie_properties(body)
+        page = notion.pages.create(
+            parent={"database_id": NOTION_MOVIES_DATABASE_ID},
+            properties=props,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Erro ao criar filme no Notion: {e}",
+        )
+
+    return CreateMovieResponse(
+        movie_id=page["id"],
+        url=page.get("url"),
+    )
+
+
+@app.get("/notion/movies", response_model=QueryMoviesResponse)
+def query_notion_movies(
+    mood: Optional[str] = Query(
+        None, description="Mood ideal (Relaxar, Divertido, Intenso, etc.)."
+    ),
+    energy_required: Optional[str] = Query(
+        None, description="Energia necessária (Alta, Média, Baixa)."
+    ),
+    max_duration: Optional[int] = Query(
+        None, description="Duração máxima em minutos."
+    ),
+    only_unwatched: bool = Query(
+        True, description="Se True, devolve apenas filmes ainda não vistos."
+    ),
+):
+    """
+    Consulta filmes na base Filmes Hub, filtrando por mood, energia, duração e se já foram vistos.
+    """
+    if NOTION_MOVIES_DATABASE_ID is None:
+        raise HTTPException(
+            status_code=500,
+            detail="NOTION_MOVIES_DATABASE_ID não está definido nas variáveis de ambiente.",
+        )
+
+    filters = []
+
+    if mood:
+        filters.append(
+            {
+                "property": "Mood Ideal",
+                "select": {"equals": mood},
+            }
+        )
+
+    if energy_required:
+        filters.append(
+            {
+                "property": "Energia Necessária",
+                "select": {"equals": energy_required},
+            }
+        )
+
+    if max_duration is not None:
+        filters.append(
+            {
+                "property": "Duração",
+                "number": {"less_than_or_equal_to": max_duration},
+            }
+        )
+
+    if only_unwatched:
+        filters.append(
+            {
+                "property": "Já Vi",
+                "checkbox": {"equals": False},
+            }
+        )
+
+    filter_obj: Optional[dict] = None
+    if len(filters) == 1:
+        filter_obj = filters[0]
+    elif len(filters) > 1:
+        filter_obj = {"and": filters}
+
+    try:
+        query_args = {"database_id": NOTION_MOVIES_DATABASE_ID}
+        if filter_obj is not None:
+            query_args["filter"] = filter_obj
+
+        result = notion.databases.query(**query_args)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao consultar filmes: {e}",
+        )
+
+    movies = [page_to_movie_summary(page) for page in result.get("results", [])]
+    return QueryMoviesResponse(movies=movies)
+
+
+@app.patch("/notion/movies/{movieId}", response_model=UpdateMovieResponse)
+def update_notion_movie(
+    body: UpdateMovieRequest,
+    movieId: str = Path(..., description="ID do filme no Notion"),
+):
+    """
+    Actualiza campos de um filme existente na base Filmes Hub.
+    Apenas os campos presentes no body são alterados.
+    """
+    if NOTION_MOVIES_DATABASE_ID is None:
+        raise HTTPException(
+            status_code=500,
+            detail="NOTION_MOVIES_DATABASE_ID não está definido nas variáveis de ambiente.",
+        )
+
+    properties = {}
+
+    if body.movie_title is not None:
+        properties["Filme"] = {
+            "title": [{"text": {"content": body.movie_title}}]
+        }
+
+    if body.categories is not None:
+        properties["Categoria"] = {
+            "multi_select": [{"name": c} for c in body.categories]
+        }
+
+    if body.energy_required is not None:
+        properties["Energia Necessária"] = {
+            "select": {"name": body.energy_required}
+        }
+
+    if body.mood is not None:
+        properties["Mood Ideal"] = {"select": {"name": body.mood}}
+
+    if body.duration is not None:
+        properties["Duração"] = {"number": body.duration}
+
+    if body.watched is not None:
+        properties["Já Vi"] = {"checkbox": body.watched}
+
+    if body.watched_date is not None:
+        properties["Data Visto"] = {"date": {"start": body.watched_date}}
+
+    if body.rating is not None:
+        properties["Avaliação"] = {"number": body.rating}
+
+    if body.notes is not None:
+        properties["Notas"] = {
+            "rich_text": [{"text": {"content": body.notes}}]
+        }
+
+    if not properties:
+        raise HTTPException(
+            status_code=400,
+            detail="Nenhum campo para actualizar.",
+        )
+
+    try:
+        notion.pages.update(page_id=movieId, properties=properties)
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Erro ao actualizar filme no Notion: {e}",
+        )
+
+    return UpdateMovieResponse(
+        movie_id=movieId,
         updated_fields=list(properties.keys()),
     )
