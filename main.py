@@ -1,27 +1,33 @@
 import os
 from typing import Optional, List
-from datetime import date as date_cls
+from datetime import date as date_type
 
 from fastapi import FastAPI, HTTPException, Path, Query
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from notion_client import Client as NotionClient
 
-# Carregar variáveis de ambiente
+# -------------------------------------------------------------------
+# Configuração base
+# -------------------------------------------------------------------
+
 load_dotenv()
 
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 NOTION_TASKS_DATABASE_ID = os.getenv("NOTION_TASKS_DATABASE_ID")
 
 if NOTION_API_KEY is None or NOTION_TASKS_DATABASE_ID is None:
-    raise RuntimeError("NOTION_API_KEY e NOTION_TASKS_DATABASE_ID têm de estar definidos nas variáveis de ambiente.")
+    raise RuntimeError(
+        "NOTION_API_KEY e NOTION_TASKS_DATABASE_ID têm de estar definidos nas variáveis de ambiente."
+    )
 
 notion = NotionClient(auth=NOTION_API_KEY)
 
 app = FastAPI(title="Mia Notion API")
 
-
-# ---------- MODELOS Pydantic ----------
+# -------------------------------------------------------------------
+# Schemas
+# -------------------------------------------------------------------
 
 class CreateNotionTaskRequest(BaseModel):
     task_title: str
@@ -56,10 +62,12 @@ class UpdateNotionTaskResponse(BaseModel):
     updated_fields: List[str]
 
 
-# ---------- HELPERS PARA CRIAR / LER PROPRIEDADES ----------
+# -------------------------------------------------------------------
+# Helpers para mapear propriedades do Notion
+# -------------------------------------------------------------------
 
 def build_notion_task_properties(body: CreateNotionTaskRequest):
-    # Estes nomes têm de bater certo com as colunas da tua base Task Hub
+    # Estes nomes têm de bater certo com a tua base Task Hub
     props = {
         "Tarefa": {
             "title": [{"text": {"content": body.task_title}}],
@@ -84,46 +92,34 @@ def build_notion_task_properties(body: CreateNotionTaskRequest):
     return props
 
 
-def _extract_title(prop: dict) -> Optional[str]:
-    title = prop.get("title")
-    if not title:
+def _get_title(props: dict) -> str:
+    title_prop = props.get("Tarefa", {}).get("title", [])
+    if not title_prop:
+        return ""
+    return title_prop[0].get("plain_text") or title_prop[0].get("text", {}).get("content", "")
+
+
+def _get_date(props: dict, name: str) -> Optional[str]:
+    d = props.get(name, {}).get("date")
+    if not d:
         return None
-    return "".join([t.get("plain_text", "") for t in title])
+    return d.get("start")
 
 
-def _extract_select(prop: dict) -> Optional[str]:
-    select = prop.get("select")
-    if not select:
+def _get_select(props: dict, name: str) -> Optional[str]:
+    s = props.get(name, {}).get("select")
+    if not s:
         return None
-    return select.get("name")
+    return s.get("name")
 
 
-def _extract_number(prop: dict) -> Optional[float]:
-    return prop.get("number")
+def _get_number(props: dict, name: str) -> Optional[float]:
+    return props.get(name, {}).get("number")
 
 
-def _extract_date(prop: dict) -> Optional[str]:
-    date_val = prop.get("date")
-    if not date_val:
-        return None
-    return date_val.get("start")
-
-
-def _page_to_task(page: dict) -> dict:
-    props = page.get("properties", {})
-    return {
-        "id": page.get("id"),
-        "title": _extract_title(props.get("Tarefa", {})),
-        "planned_date": _extract_date(props.get("Data Planeada", {})),
-        "deadline": _extract_date(props.get("Deadline", {})),
-        "priority": _extract_select(props.get("Prioridade", {})),
-        "area": _extract_select(props.get("Área da Vida", {})),
-        "notes": None,  # se quiseres depois conseguimos extrair as notas também
-        "duration_minutes": _extract_number(props.get("Duração Estimada (min)", {})),
-    }
-
-
-# ---------- ENDPOINTS: CRIAR / ACTUALIZAR ----------
+# -------------------------------------------------------------------
+# POST – criar tarefa
+# -------------------------------------------------------------------
 
 @app.post("/notion/tasks", response_model=CreateNotionTaskResponse)
 def create_notion_task(body: CreateNotionTaskRequest):
@@ -141,6 +137,10 @@ def create_notion_task(body: CreateNotionTaskRequest):
         url=page.get("url"),
     )
 
+
+# -------------------------------------------------------------------
+# PATCH – actualizar tarefa
+# -------------------------------------------------------------------
 
 @app.patch("/notion/tasks/{taskId}", response_model=UpdateNotionTaskResponse)
 def update_notion_task(
@@ -181,16 +181,18 @@ def update_notion_task(
     return UpdateNotionTaskResponse(task_id=taskId, updated_fields=updated_fields)
 
 
-# ---------- ENDPOINT: LER TAREFAS POR DATA (GET) ----------
+# -------------------------------------------------------------------
+# GET – listar tarefas por dia (usado pela Mia para “tarefas de hoje”)
+# -------------------------------------------------------------------
 
 @app.get("/notion/tasks")
 def get_tasks_for_date(
-    target_date: date_cls = Query(..., description="Data alvo no formato YYYY-MM-DD"),
+    target_date: date_type = Query(..., description="Data alvo no formato YYYY-MM-DD"),
 ):
     """
     Devolve todas as tarefas cuja Data Planeada OU Deadline sejam iguais à data indicada.
-    Usado pela Mia para responder a perguntas do tipo 'Quais são as tarefas de hoje?'.
     """
+
     iso_date = target_date.isoformat()
 
     try:
@@ -198,14 +200,37 @@ def get_tasks_for_date(
             database_id=NOTION_TASKS_DATABASE_ID,
             filter={
                 "or": [
-                    {"property": "Data Planeada", "date": {"equals": iso_date}},
-                    {"property": "Deadline", "date": {"equals": iso_date}},
+                    {
+                        "property": "Data Planeada",
+                        "date": {"equals": iso_date},
+                    },
+                    {
+                        "property": "Deadline",
+                        "date": {"equals": iso_date},
+                    },
                 ]
             },
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao consultar tarefas: {e}")
+        # 400 para não aparecer como erro "misterioso" de servidor
+        raise HTTPException(status_code=400, detail=f"Erro ao consultar Notion: {e}")
 
-    tasks = [_page_to_task(page) for page in response.get("results", [])]
+    tasks = []
+
+    for page in response.get("results", []):
+        props = page.get("properties", {})
+
+        tasks.append(
+            {
+                "id": page.get("id"),
+                "title": _get_title(props),
+                "planned_date": _get_date(props, "Data Planeada"),
+                "deadline": _get_date(props, "Deadline"),
+                "priority": _get_select(props, "Prioridade"),
+                "area": _get_select(props, "Área da Vida"),
+                "duration_minutes": _get_number(props, "Duração Estimada (min)"),
+                "url": page.get("url"),
+            }
+        )
 
     return {"tasks": tasks}
