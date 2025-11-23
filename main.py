@@ -342,3 +342,93 @@ def get_tasks_for_date(
 
     return {"tasks": results}
 
+from datetime import datetime
+from fastapi import Query
+
+def parse_iso_date(date_str: str):
+    try:
+        return datetime.fromisoformat(date_str).date()
+    except:
+        return None
+
+
+@app.get("/notion/tasks")
+async def query_tasks(
+    date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    from_: Optional[str] = Query(None, alias="from", description="YYYY-MM-DD"),
+    to: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    scope: str = Query("both", description="planned | deadline | both"),
+    overdue: bool = False,
+):
+    """
+    Devolve tarefas da Task Hub filtradas por Data Planeada / Deadline.
+    """
+
+    try:
+        response = notion.databases.query(
+            **{
+                "database_id": NOTION_TASKS_DATABASE_ID
+            }
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Erro ao consultar Notion: {e}")
+
+    results = response.get("results", [])
+    tasks = []
+
+    # Converter filtros
+    f_date = parse_iso_date(date) if date else None
+    f_from = parse_iso_date(from_) if from_ else None
+    f_to = parse_iso_date(to) if to else None
+    today = datetime.now().date()
+
+    for page in results:
+        props = page["properties"]
+
+        # Ir buscar datas
+        planned_raw = props.get("Data Planeada", {}).get("date")
+        deadline_raw = props.get("Deadline", {}).get("date")
+
+        planned = parse_iso_date(planned_raw["start"]) if planned_raw else None
+        deadline = parse_iso_date(deadline_raw["start"]) if deadline_raw else None
+
+        matched = False
+
+        # FILTRO 1 — overdue (usar Deadline)
+        if overdue:
+            if deadline and deadline < today:
+                matched = True
+
+        # FILTRO 2 — date exata
+        if f_date:
+            if scope in ("planned", "both") and planned == f_date:
+                matched = True
+            if scope in ("deadline", "both") and deadline == f_date:
+                matched = True
+
+        # FILTRO 3 — intervalo
+        if f_from and f_to:
+            if scope in ("planned", "both") and planned and f_from <= planned <= f_to:
+                matched = True
+            if scope in ("deadline", "both") and deadline and f_from <= deadline <= f_to:
+                matched = True
+
+        # Se nenhum filtro foi usado → devolver tudo
+        if not date and not from_ and not to and not overdue:
+            matched = True
+
+        if matched:
+            tasks.append({
+                "id": page["id"],
+                "title": props["Tarefa"]["title"][0]["text"]["content"] if props["Tarefa"]["title"] else "",
+                "planned_date": planned.isoformat() if planned else None,
+                "deadline": deadline.isoformat() if deadline else None,
+                "priority": props["Prioridade"]["select"]["name"] if props["Prioridade"]["select"] else None
+            })
+
+    return {
+        "count": len(tasks),
+        "tasks": tasks
+    }
+
+
