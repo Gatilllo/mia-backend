@@ -1,15 +1,16 @@
 import os
 from typing import Optional, List
-from datetime import date as date_cls, datetime
+from datetime import date as date_cls
 
+import requests
 from fastapi import FastAPI, HTTPException, Path, Query
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from notion_client import Client as NotionClient
 
-# ============================================================
-# Configuração inicial
-# ============================================================
+# ─────────────────────────────────────────────
+# Configuração Notion
+# ─────────────────────────────────────────────
 
 load_dotenv()
 
@@ -17,18 +18,21 @@ NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 NOTION_TASKS_DATABASE_ID = os.getenv("NOTION_TASKS_DATABASE_ID")
 
 if NOTION_API_KEY is None or NOTION_TASKS_DATABASE_ID is None:
-    raise RuntimeError(
-        "NOTION_API_KEY e NOTION_TASKS_DATABASE_ID têm de estar definidos nas variáveis de ambiente."
-    )
+    raise RuntimeError("NOTION_API_KEY e NOTION_TASKS_DATABASE_ID têm de estar definidos nas variáveis de ambiente.")
 
 notion = NotionClient(auth=NOTION_API_KEY)
 
+NOTION_HEADERS = {
+    "Authorization": f"Bearer {NOTION_API_KEY}",
+    "Notion-Version": "2022-06-28",
+    "Content-Type": "application/json",
+}
+
 app = FastAPI(title="Mia Notion API")
 
-
-# ============================================================
+# ─────────────────────────────────────────────
 # Modelos Pydantic
-# ============================================================
+# ─────────────────────────────────────────────
 
 class CreateNotionTaskRequest(BaseModel):
     task_title: str
@@ -63,31 +67,14 @@ class UpdateNotionTaskResponse(BaseModel):
     updated_fields: List[str]
 
 
-class TaskSummary(BaseModel):
-    task_id: str
-    task_title: Optional[str]
-    priority: Optional[str]
-    state: Optional[str]
-    planned_date: Optional[str]
-    deadline: Optional[str]
-    area_of_life: Optional[str]
-    energy_level: Optional[str]
-    duration_minutes: Optional[int]
-    url: Optional[str]
-
-
-class QueryTasksResponse(BaseModel):
-    tasks: List[TaskSummary]
-
-
-# ============================================================
+# ─────────────────────────────────────────────
 # Helpers para mapear propriedades do Notion
-# ============================================================
+# ─────────────────────────────────────────────
 
 def build_notion_task_properties(body: CreateNotionTaskRequest):
     """
     Constrói o dicionário de propriedades para criar uma página no Notion.
-    Os nomes das propriedades têm de bater certo com a base Task Hub 2.0.
+    Nomes das propriedades têm de bater certo com as colunas da base Task Hub.
     """
     props = {
         "Tarefa": {
@@ -138,35 +125,28 @@ def _extract_date(prop: dict) -> Optional[str]:
     return date_val.get("start")
 
 
-def _page_to_task(page: dict) -> TaskSummary:
-    """
-    Converte um registo (page) do Notion num resumo de tarefa.
-    """
+def page_to_task(page: dict) -> dict:
     props = page.get("properties", {})
+    return {
+        "task_id": page.get("id"),
+        "task_title": _extract_title(props.get("Tarefa", {})),
+        "priority": _extract_select(props.get("Prioridade", {})),
+        "state": _extract_select(props.get("Estado", {})),
+        "planned_date": _extract_date(props.get("Data Planeada", {})),
+        "deadline": _extract_date(props.get("Deadline", {})),
+        "area_of_life": _extract_select(props.get("Área da Vida", {})),
+        "energy_level": _extract_select(props.get("Energia Necessária", {})),
+        "duration_minutes": _extract_number(props.get("Duração Estimada (min)", {})),
+        "url": page.get("url"),
+    }
 
-    return TaskSummary(
-        task_id=page.get("id"),
-        task_title=_extract_title(props.get("Tarefa", {})),
-        priority=_extract_select(props.get("Prioridade", {})),
-        state=_extract_select(props.get("Estado", {})),
-        planned_date=_extract_date(props.get("Data Planeada", {})),
-        deadline=_extract_date(props.get("Deadline", {})),
-        area_of_life=_extract_select(props.get("Área da Vida", {})),
-        energy_level=_extract_select(props.get("Energia Necessária", {})),
-        duration_minutes=_extract_number(props.get("Duração Estimada (min)", {})),
-        url=page.get("url"),
-    )
 
-
-# ============================================================
-# Endpoints: criar / actualizar tarefa
-# ============================================================
+# ─────────────────────────────────────────────
+# ENDPOINT: Criar tarefa
+# ─────────────────────────────────────────────
 
 @app.post("/notion/tasks", response_model=CreateNotionTaskResponse)
 def create_notion_task(body: CreateNotionTaskRequest):
-    """
-    Cria uma nova tarefa na base Task Hub 2.0.
-    """
     try:
         props = build_notion_task_properties(body)
         page = notion.pages.create(
@@ -182,16 +162,16 @@ def create_notion_task(body: CreateNotionTaskRequest):
     )
 
 
+# ─────────────────────────────────────────────
+# ENDPOINT: Actualizar tarefa
+# ─────────────────────────────────────────────
+
 @app.patch("/notion/tasks/{taskId}", response_model=UpdateNotionTaskResponse)
 def update_notion_task(
     body: UpdateNotionTaskRequest,
     taskId: str = Path(..., description="ID da tarefa no Notion"),
 ):
-    """
-    Actualiza campos de uma tarefa existente na base Task Hub 2.0.
-    Só altera os campos presentes no corpo do pedido.
-    """
-    properties: dict = {}
+    properties = {}
 
     if body.task_title is not None:
         properties["Tarefa"] = {"title": [{"text": {"content": body.task_title}}]}
@@ -225,41 +205,110 @@ def update_notion_task(
     return UpdateNotionTaskResponse(task_id=taskId, updated_fields=updated_fields)
 
 
-# ============================================================
-# Endpoint: consultar tarefas por dia
-# ============================================================
+# ─────────────────────────────────────────────
+# ENDPOINT: Consultar tarefas (GET)
+# ─────────────────────────────────────────────
 
-@app.get("/notion/tasks", response_model=QueryTasksResponse)
-def get_tasks_for_date(
-    target_date: Optional[date_cls] = Query(
-        None,
-        description="Data alvo no formato YYYY-MM-DD. Se não for enviada, assume hoje.",
-    ),
+@app.get("/notion/tasks")
+def query_tasks(
+    date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    from_: Optional[str] = Query(None, alias="from", description="YYYY-MM-DD"),
+    to: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    scope: str = Query("both", description="planned | deadline | both"),
+    overdue: bool = False,
 ):
     """
-    Devolve as tarefas cuja Data Planeada OU Deadline coincidam com a data indicada.
-    Se `target_date` não vier, usa a data de hoje.
-    """
-    # Se não vier target_date, usar hoje
-    if target_date is None:
-        target_date = datetime.today().date()
+    Consulta tarefas na base Task Hub 2.0.
 
-    iso_date = target_date.isoformat()
+    - overdue = true    → tarefas atrasadas (Deadline < hoje, Estado != Concluído/Cancelado)
+    - date definido     → tarefas desse dia (Data Planeada e/ou Deadline, consoante `scope`)
+    - from/to definidos → intervalo de datas (Data Planeada e/ou Deadline)
+    - sem filtros       → tarefas ativas (não concluídas/canceladas)
+    """
 
     try:
-        response = notion.databases.query(
-            database_id=NOTION_TASKS_DATABASE_ID,
-            filter={
-                "or": [
-                    {"property": "Data Planeada", "date": {"equals": iso_date}},
-                    {"property": "Deadline", "date": {"equals": iso_date}},
+        filter_obj = None
+
+        # 1) Tarefas atrasadas
+        if overdue:
+            today_str = date_cls.today().isoformat()
+            filter_obj = {
+                "and": [
+                    {"property": "Deadline", "date": {"before": today_str}},
+                    {"property": "Estado", "select": {"does_not_equal": "Concluído"}},
+                    {"property": "Estado", "select": {"does_not_equal": "Cancelado"}},
                 ]
-            },
+            }
+
+        # 2) Tarefas num dia específico
+        elif date:
+            per_props = []
+            if scope in ("planned", "both"):
+                per_props.append({"property": "Data Planeada", "date": {"equals": date}})
+            if scope in ("deadline", "both"):
+                per_props.append({"property": "Deadline", "date": {"equals": date}})
+
+            if len(per_props) == 1:
+                filter_obj = per_props[0]
+            elif len(per_props) > 1:
+                filter_obj = {"or": per_props}
+
+        # 3) Intervalo de datas
+        elif from_ or to:
+            range_filters = []
+            if scope in ("planned", "both"):
+                cond = {"property": "Data Planeada", "date": {}}
+                if from_:
+                    cond["date"]["on_or_after"] = from_
+                if to:
+                    cond["date"]["on_or_before"] = to
+                range_filters.append(cond)
+
+            if scope in ("deadline", "both"):
+                cond = {"property": "Deadline", "date": {}}
+                if from_:
+                    cond["date"]["on_or_after"] = from_
+                if to:
+                    cond["date"]["on_or_before"] = to
+                range_filters.append(cond)
+
+            if len(range_filters) == 1:
+                filter_obj = range_filters[0]
+            elif len(range_filters) > 1:
+                filter_obj = {"or": range_filters}
+
+        # 4) Sem filtro → tarefas ativas
+        if filter_obj is None:
+            filter_obj = {
+                "and": [
+                    {"property": "Estado", "select": {"does_not_equal": "Concluído"}},
+                    {"property": "Estado", "select": {"does_not_equal": "Cancelado"}},
+                ]
+            }
+
+        payload = {}
+        if filter_obj is not None:
+            payload["filter"] = filter_obj
+
+        resp = requests.post(
+            f"https://api.notion.com/v1/databases/{NOTION_TASKS_DATABASE_ID}/query",
+            headers=NOTION_HEADERS,
+            json=payload,
         )
+
+        if resp.status_code != 200:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Erro ao consultar tarefas (Notion respondeu {resp.status_code}): {resp.text}",
+            )
+
+        data = resp.json()
+        tasks = [page_to_task(page) for page in data.get("results", [])]
+
+        return {"tasks": tasks}
+
+    except HTTPException:
+        # re-lançar HTTPException tal como está
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao consultar tarefas: {e}")
-
-    pages = response.get("results", [])
-    tasks = [_page_to_task(page) for page in pages]
-
-    return QueryTasksResponse(tasks=tasks)
