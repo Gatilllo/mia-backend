@@ -28,15 +28,6 @@ app = FastAPI(title="Mia Notion API")
 
 
 # ============================================================
-#  ENDPOINT DE SAÚDE (opcional, mas útil)
-# ============================================================
-
-@app.get("/")
-def healthcheck():
-    return {"status": "ok"}
-
-
-# ============================================================
 #  MODELOS – TASK HUB (tarefas)
 # ============================================================
 
@@ -89,6 +80,35 @@ class QueryTasksResponse(BaseModel):
 
 
 # ============================================================
+#  HELPERS GENÉRICOS
+# ============================================================
+
+def _extract_title(prop: dict) -> Optional[str]:
+    title = prop.get("title")
+    if not title:
+        return None
+    return "".join(part.get("plain_text", "") for part in title)
+
+
+def _extract_select_name(prop: dict) -> Optional[str]:
+    sel = prop.get("select")
+    if not sel:
+        return None
+    return sel.get("name")
+
+
+def _extract_date_start(prop: dict) -> Optional[str]:
+    date_val = prop.get("date")
+    if not date_val:
+        return None
+    return date_val.get("start")
+
+
+def _extract_number(prop: dict) -> Optional[float]:
+    return prop.get("number")
+
+
+# ============================================================
 #  HELPERS – TASK HUB
 # ============================================================
 
@@ -125,27 +145,6 @@ def build_notion_task_properties(body: CreateNotionTaskRequest):
         props["Notas"] = {"rich_text": [{"text": {"content": body.notes}}]}
 
     return props
-
-
-def _extract_title(prop: dict) -> Optional[str]:
-    title = prop.get("title")
-    if not title:
-        return None
-    return "".join(part.get("plain_text", "") for part in title)
-
-
-def _extract_select_name(prop: dict) -> Optional[str]:
-    sel = prop.get("select")
-    if not sel:
-        return None
-    return sel.get("name")
-
-
-def _extract_date_start(prop: dict) -> Optional[str]:
-    date_val = prop.get("date")
-    if not date_val:
-        return None
-    return date_val.get("start")
 
 
 def page_to_task_summary(page: dict) -> TaskSummary:
@@ -309,19 +308,30 @@ def update_notion_task(
 
 
 # ============================================================
-#  MODELOS – FILMES HUB
+#  MODELOS – FILMES HUB (alinhados com a tua base)
 # ============================================================
 
 class CreateMovieRequest(BaseModel):
     title: str
-    status: Optional[str] = None  # Por ver | Visto
-    notes: Optional[str] = None
+    category: Optional[str] = None           # mapeia para "Categoria" (select)
+    energy_required: Optional[str] = None    # "Energia Necessária" (select)
+    ideal_mood: Optional[str] = None         # "Mood Ideal" (select)
+    duration: Optional[int] = None           # "Duração" (minutos)
+    watched: Optional[bool] = None           # "Já Vi" (checkbox)
+    watched_date: Optional[str] = None       # "Data Visto" (YYYY-MM-DD)
+    rating: Optional[float] = None           # "Avaliação" (1-10, por ex.)
 
 
 class MovieSummary(BaseModel):
     movie_id: str
     title: Optional[str] = None
-    status: Optional[str] = None
+    category: Optional[str] = None
+    energy_required: Optional[str] = None
+    ideal_mood: Optional[str] = None
+    duration: Optional[int] = None
+    watched: Optional[bool] = None
+    watched_date: Optional[str] = None
+    rating: Optional[float] = None
     url: Optional[str] = None
 
 
@@ -331,8 +341,13 @@ class QueryMoviesResponse(BaseModel):
 
 class UpdateMovieRequest(BaseModel):
     title: Optional[str] = None
-    status: Optional[str] = None
-    notes: Optional[str] = None
+    category: Optional[str] = None
+    energy_required: Optional[str] = None
+    ideal_mood: Optional[str] = None
+    duration: Optional[int] = None
+    watched: Optional[bool] = None
+    watched_date: Optional[str] = None
+    rating: Optional[float] = None
 
 
 class UpdateMovieResponse(BaseModel):
@@ -358,35 +373,68 @@ def build_movie_properties(body: CreateMovieRequest):
     """
     Mapeia o pedido para as propriedades da base Filmes Hub.
 
-    Na base Filmes Hub:
-      - Título (title)
-      - Estado (select)
-      - Notas (rich_text, opcional)
+    Colunas actuais na tua base:
+      - Filme (title)
+      - Categoria (select)
+      - Energia Necessária (select)
+      - Mood Ideal (select)
+      - Duração (number)
+      - Já Vi (checkbox)
+      - Data Visto (date)
+      - Avaliação (number)
     """
     props = {
-        "Título": {
+        "Filme": {
             "title": [{"text": {"content": body.title}}],
         }
     }
 
-    if body.status:
-        props["Estado"] = {"select": {"name": body.status}}
+    if body.category:
+        props["Categoria"] = {"select": {"name": body.category}}
 
-    if body.notes:
-        props["Notas"] = {"rich_text": [{"text": {"content": body.notes}}]}
+    if body.energy_required:
+        props["Energia Necessária"] = {"select": {"name": body.energy_required}}
+
+    if body.ideal_mood:
+        props["Mood Ideal"] = {"select": {"name": body.ideal_mood}}
+
+    if body.duration is not None:
+        props["Duração"] = {"number": body.duration}
+
+    if body.watched is not None:
+        props["Já Vi"] = {"checkbox": body.watched}
+
+    if body.watched_date:
+        props["Data Visto"] = {"date": {"start": body.watched_date}}
+
+    if body.rating is not None:
+        props["Avaliação"] = {"number": body.rating}
 
     return props
 
 
 def page_to_movie_summary(page: dict) -> MovieSummary:
     props = page.get("properties", {})
-    title = _extract_title(props.get("Título", {}))
-    status = _extract_select_name(props.get("Estado", {}))
+
+    title = _extract_title(props.get("Filme", {}))
+    category = _extract_select_name(props.get("Categoria", {}))
+    energy = _extract_select_name(props.get("Energia Necessária", {}))
+    mood = _extract_select_name(props.get("Mood Ideal", {}))
+    duration = _extract_number(props.get("Duração", {}))
+    watched = props.get("Já Vi", {}).get("checkbox")
+    watched_date = _extract_date_start(props.get("Data Visto", {}))
+    rating = _extract_number(props.get("Avaliação", {}))
 
     return MovieSummary(
         movie_id=page.get("id"),
         title=title,
-        status=status,
+        category=category,
+        energy_required=energy,
+        ideal_mood=mood,
+        duration=int(duration) if duration is not None else None,
+        watched=watched,
+        watched_date=watched_date,
+        rating=rating,
         url=page.get("url"),
     )
 
@@ -401,7 +449,7 @@ def create_movie(body: CreateMovieRequest):
     Cria um novo registo na base 'Filmes Hub'.
 
     Usado, por exemplo, quando o utilizador passa uma lista de filmes
-    e quer guardar todos (alguns já como 'Visto').
+    e quer guardar todos (alguns já como vistos).
     """
     database_id = _movies_db_or_500()
 
@@ -422,22 +470,24 @@ def create_movie(body: CreateMovieRequest):
 
 @app.get("/notion/movies", response_model=QueryMoviesResponse)
 def list_movies(
-    status: Optional[str] = Query(
+    watched: Optional[bool] = Query(
         None,
-        description="Filtra por Estado (ex.: 'Por ver', 'Visto'). Se vazio, devolve todos.",
+        description="Filtra por 'Já Vi' (True/False). Se vazio, devolve todos.",
     )
 ):
     """
     Lista filmes da base 'Filmes Hub'.
-    A Mia pode usar este endpoint para sugerir um filme com base no contexto / energia.
+
+    A Mia pode usar este endpoint para sugerir um filme com base
+    no contexto / energia / se já foi visto ou não.
     """
     database_id = _movies_db_or_500()
 
     filter_obj = None
-    if status:
+    if watched is not None:
         filter_obj = {
-            "property": "Estado",
-            "select": {"equals": status},
+            "property": "Já Vi",
+            "checkbox": {"equals": watched},
         }
 
     try:
@@ -466,24 +516,37 @@ def update_movie(
     movieId: str = Path(..., description="ID do filme na base Filmes Hub"),
 ):
     """
-    Actualiza um registo na base Filmes Hub (por ex., marcar como 'Visto').
+    Actualiza um registo na base Filmes Hub (por ex., marcar como 'Já Vi').
     """
     _movies_db_or_500()  # só para garantir que está configurado
 
     properties = {}
 
     if body.title is not None:
-        properties["Título"] = {
+        properties["Filme"] = {
             "title": [{"text": {"content": body.title}}],
         }
 
-    if body.status is not None:
-        properties["Estado"] = {"select": {"name": body.status}}
+    if body.category is not None:
+        properties["Categoria"] = {"select": {"name": body.category}}
 
-    if body.notes is not None:
-        properties["Notas"] = {
-            "rich_text": [{"text": {"content": body.notes}}]
-        }
+    if body.energy_required is not None:
+        properties["Energia Necessária"] = {"select": {"name": body.energy_required}}
+
+    if body.ideal_mood is not None:
+        properties["Mood Ideal"] = {"select": {"name": body.ideal_mood}}
+
+    if body.duration is not None:
+        properties["Duração"] = {"number": body.duration}
+
+    if body.watched is not None:
+        properties["Já Vi"] = {"checkbox": body.watched}
+
+    if body.watched_date is not None:
+        properties["Data Visto"] = {"date": {"start": body.watched_date}}
+
+    if body.rating is not None:
+        properties["Avaliação"] = {"number": body.rating}
 
     if not properties:
         raise HTTPException(
