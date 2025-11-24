@@ -14,6 +14,7 @@ load_dotenv()
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 NOTION_TASKS_DATABASE_ID = os.getenv("NOTION_TASKS_DATABASE_ID")
 NOTION_MOVIES_DATABASE_ID = os.getenv("NOTION_MOVIES_DATABASE_ID")
+NOTION_BOOKS_DATABASE_ID = os.getenv("NOTION_BOOKS_DATABASE_ID")
 
 if NOTION_API_KEY is None:
     raise RuntimeError("NOTION_API_KEY tem de estar definido nas variáveis de ambiente.")
@@ -21,13 +22,14 @@ if NOTION_API_KEY is None:
 if NOTION_TASKS_DATABASE_ID is None:
     raise RuntimeError("NOTION_TASKS_DATABASE_ID tem de estar definido nas variáveis de ambiente.")
 
-# NOTION_MOVIES_DATABASE_ID é opcional (depende se configuraste Filmes Hub ou não)
+# NOTION_MOVIES_DATABASE_ID e NOTION_BOOKS_DATABASE_ID são opcionais
+# (dependem se configuraste Filmes Hub / Livros Hub ou não)
 
 notion = NotionClient(auth=NOTION_API_KEY)
 
 app = FastAPI(title="Mia Notion API")
 
-# Constantes para nomes de propriedades no Notion
+# Constantes para nomes de propriedades no Notion (tarefas)
 TASK_TITLE_PROP = "Tarefa"
 TASK_PRIORITY_PROP = "Prioridade"
 TASK_PLANNED_DATE_PROP = "Data Planeada"
@@ -38,9 +40,15 @@ TASK_AREA_PROP = "Área da Vida"
 TASK_STATE_PROP = "Estado"
 TASK_NOTES_PROP = "Notas"
 
+# Filmes
 MOVIE_TITLE_PROP = "Filme"
 MOVIE_WATCHED_PROP = "Já Vi"
 MOVIE_NOTES_PROP = "Notas"
+
+# Livros
+BOOK_TITLE_PROP = "Livro"
+BOOK_READ_PROP = "Já Li"
+BOOK_NOTES_PROP = "Notas"
 
 
 # ============================================================
@@ -96,6 +104,64 @@ class QueryTasksResponse(BaseModel):
 
 
 # ============================================================
+#  HELPERS – genéricos
+# ============================================================
+
+def _extract_title(prop: dict) -> Optional[str]:
+    title = prop.get("title")
+    if not title:
+        return None
+    return "".join(part.get("plain_text", "") for part in title)
+
+
+def _extract_select_name(prop: dict) -> Optional[str]:
+    sel = prop.get("select")
+    if not sel:
+        return None
+    return sel.get("name")
+
+
+def _extract_date_start(prop: dict) -> Optional[str]:
+    date_val = prop.get("date")
+    if not date_val:
+        return None
+    return date_val.get("start")
+
+
+def _extract_checkbox(prop: dict) -> Optional[bool]:
+    if not prop:
+        return None
+    return prop.get("checkbox")
+
+
+def _resolve_bool_from_status_and_flag(
+    status: Optional[str],
+    flag: Optional[bool],
+) -> Optional[bool]:
+    """
+    Converte status ('Visto' / 'Por ver', 'Lido' / 'Por ler') + flag booleana
+    num booleano final. Priority: flag > status.
+    """
+    if flag is not None:
+        return flag
+
+    if not status:
+        return None
+
+    s = status.strip().lower()
+
+    # vistos / lidos
+    if s in ("visto", "já vi", "ja vi", "lido", "já li", "ja li"):
+        return True
+
+    # por ver / por ler / não lido
+    if s in ("por ver", "por ler", "nao lido", "não lido"):
+        return False
+
+    return None
+
+
+# ============================================================
 #  HELPERS – TASK HUB
 # ============================================================
 
@@ -128,33 +194,6 @@ def build_notion_task_properties(body: CreateNotionTaskRequest):
         props[TASK_NOTES_PROP] = {"rich_text": [{"text": {"content": body.notes}}]}
 
     return props
-
-
-def _extract_title(prop: dict) -> Optional[str]:
-    title = prop.get("title")
-    if not title:
-        return None
-    return "".join(part.get("plain_text", "") for part in title)
-
-
-def _extract_select_name(prop: dict) -> Optional[str]:
-    sel = prop.get("select")
-    if not sel:
-        return None
-    return sel.get("name")
-
-
-def _extract_date_start(prop: dict) -> Optional[str]:
-    date_val = prop.get("date")
-    if not date_val:
-        return None
-    return date_val.get("start")
-
-
-def _extract_checkbox(prop: dict) -> Optional[bool]:
-    if not prop:
-        return None
-    return prop.get("checkbox")
 
 
 def page_to_task_summary(page: dict) -> TaskSummary:
@@ -360,29 +399,6 @@ def _movies_db_or_500() -> str:
     return NOTION_MOVIES_DATABASE_ID
 
 
-def _resolve_watched_from_status_and_flag(
-    status: Optional[str],
-    watched: Optional[bool],
-) -> Optional[bool]:
-    """
-    Converte status ("Visto" / "Por ver") + flag watched para um booleano final.
-    Priority: watched > status.
-    """
-    if watched is not None:
-        return watched
-
-    if not status:
-        return None
-
-    s = status.strip().lower()
-    if s in ("visto", "já vi", "ja vi"):
-        return True
-    if s in ("por ver", "não visto", "nao visto"):
-        return False
-
-    return None
-
-
 def build_movie_properties(body: CreateMovieRequest):
     """
     Mapeia o pedido para as propriedades da base Filmes Hub.
@@ -396,7 +412,7 @@ def build_movie_properties(body: CreateMovieRequest):
         }
     }
 
-    watched_flag = _resolve_watched_from_status_and_flag(body.status, body.watched)
+    watched_flag = _resolve_bool_from_status_and_flag(body.status, body.watched)
     if watched_flag is not None:
         props[MOVIE_WATCHED_PROP] = {"checkbox": watched_flag}
 
@@ -456,10 +472,6 @@ def list_movies(
 ):
     """
     Lista filmes da base 'Filmes Hub'.
-    A Mia pode usar este endpoint para:
-      - saber o que já viste (watched=true)
-      - ou o que ainda tens por ver (watched=false)
-      - ou então listar todos (watched omitido).
     """
     database_id = _movies_db_or_500()
 
@@ -497,8 +509,6 @@ def update_movie(
 ):
     """
     Actualiza um registo na base Filmes Hub (por ex., marcar como 'já vi').
-    - Se vier watched=true/false, usamos isso directamente.
-    - Se vier status='Visto'/'Por ver', convertemos para o checkbox 'Já Vi'.
     """
     _movies_db_or_500()  # garante que está configurado
 
@@ -509,7 +519,7 @@ def update_movie(
             "title": [{"text": {"content": body.title}}],
         }
 
-    watched_flag = _resolve_watched_from_status_and_flag(body.status, body.watched)
+    watched_flag = _resolve_bool_from_status_and_flag(body.status, body.watched)
     if watched_flag is not None:
         properties[MOVIE_WATCHED_PROP] = {"checkbox": watched_flag}
 
@@ -534,5 +544,206 @@ def update_movie(
 
     return UpdateMovieResponse(
         movie_id=movieId,
+        updated_fields=list(properties.keys()),
+    )
+
+
+# ============================================================
+#  MODELOS – LIVROS HUB
+# ============================================================
+
+class CreateBookRequest(BaseModel):
+    title: str
+    # "Lido" | "Por ler"
+    status: Optional[str] = None
+    # atalho booleano: True = já li, False = por ler
+    read: Optional[bool] = None
+    notes: Optional[str] = None
+
+
+class BookSummary(BaseModel):
+    book_id: str
+    title: Optional[str] = None
+    read: Optional[bool] = None
+    url: Optional[str] = None
+
+
+class QueryBooksResponse(BaseModel):
+    books: List[BookSummary]
+
+
+class UpdateBookRequest(BaseModel):
+    title: Optional[str] = None
+    status: Optional[str] = None
+    read: Optional[bool] = None
+    notes: Optional[str] = None
+
+
+class UpdateBookResponse(BaseModel):
+    book_id: str
+    updated_fields: List[str]
+
+
+# ============================================================
+#  HELPERS – LIVROS HUB
+# ============================================================
+
+def _books_db_or_500() -> str:
+    if not NOTION_BOOKS_DATABASE_ID:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "NOTION_BOOKS_DATABASE_ID não está definido. "
+                "Configura o ID da base 'Livros Hub' nas variáveis de ambiente."
+            ),
+        )
+    return NOTION_BOOKS_DATABASE_ID
+
+
+def build_book_properties(body: CreateBookRequest):
+    """
+    Mapeia o pedido para as propriedades da base Livros Hub.
+    - Livro (title)
+    - Já Li (checkbox)
+    - Notas (rich_text, opcional)
+    """
+    props = {
+        BOOK_TITLE_PROP: {
+            "title": [{"text": {"content": body.title}}],
+        }
+    }
+
+    read_flag = _resolve_bool_from_status_and_flag(body.status, body.read)
+    if read_flag is not None:
+        props[BOOK_READ_PROP] = {"checkbox": read_flag}
+
+    if body.notes:
+        props[BOOK_NOTES_PROP] = {"rich_text": [{"text": {"content": body.notes}}]}
+
+    return props
+
+
+def page_to_book_summary(page: dict) -> BookSummary:
+    props = page.get("properties", {})
+    title = _extract_title(props.get(BOOK_TITLE_PROP, {}))
+    read = _extract_checkbox(props.get(BOOK_READ_PROP, {}))
+
+    return BookSummary(
+        book_id=page.get("id"),
+        title=title,
+        read=read,
+        url=page.get("url"),
+    )
+
+
+# ============================================================
+#  ENDPOINTS – LIVROS HUB
+# ============================================================
+
+@app.post("/notion/books", response_model=BookSummary)
+def create_book(body: CreateBookRequest):
+    """
+    Cria um novo registo na base 'Livros Hub'.
+    Pode já vir marcado como lido (status='Lido' ou read=true).
+    """
+    database_id = _books_db_or_500()
+
+    try:
+        props = build_book_properties(body)
+        page = notion.pages.create(
+            parent={"database_id": database_id},
+            properties=props,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Erro ao criar livro no Notion: {e}",
+        )
+
+    return page_to_book_summary(page)
+
+
+@app.get("/notion/books", response_model=QueryBooksResponse)
+def list_books(
+    read: Optional[bool] = Query(
+        None,
+        description="Filtra por 'Já Li' (true = lido, false = por ler). "
+        "Se vazio, devolve todos.",
+    )
+):
+    """
+    Lista livros da base 'Livros Hub'.
+    """
+    database_id = _books_db_or_500()
+
+    filter_obj = None
+    if read is not None:
+        filter_obj = {
+            "property": BOOK_READ_PROP,
+            "checkbox": {"equals": read},
+        }
+
+    try:
+        if filter_obj:
+            result = notion.databases.query(
+                database_id=database_id,
+                filter=filter_obj,
+            )
+        else:
+            result = notion.databases.query(
+                database_id=database_id,
+            )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao consultar livros: {e}",
+        )
+
+    books = [page_to_book_summary(page) for page in result.get("results", [])]
+    return QueryBooksResponse(books=books)
+
+
+@app.patch("/notion/books/{bookId}", response_model=UpdateBookResponse)
+def update_book(
+    body: UpdateBookRequest,
+    bookId: str = Path(..., description="ID do livro na base Livros Hub"),
+):
+    """
+    Actualiza um registo na base Livros Hub (por ex., marcar como 'já li').
+    """
+    _books_db_or_500()  # garante que está configurado
+
+    properties = {}
+
+    if body.title is not None:
+        properties[BOOK_TITLE_PROP] = {
+            "title": [{"text": {"content": body.title}}],
+        }
+
+    read_flag = _resolve_bool_from_status_and_flag(body.status, body.read)
+    if read_flag is not None:
+        properties[BOOK_READ_PROP] = {"checkbox": read_flag}
+
+    if body.notes is not None:
+        properties[BOOK_NOTES_PROP] = {
+            "rich_text": [{"text": {"content": body.notes}}]
+        }
+
+    if not properties:
+        raise HTTPException(
+            status_code=400,
+            detail="Nenhum campo para actualizar.",
+        )
+
+    try:
+        notion.pages.update(page_id=bookId, properties=properties)
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Erro ao actualizar livro no Notion: {e}",
+        )
+
+    return UpdateBookResponse(
+        book_id=bookId,
         updated_fields=list(properties.keys()),
     )
