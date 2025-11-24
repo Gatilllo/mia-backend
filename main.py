@@ -15,6 +15,7 @@ NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 NOTION_TASKS_DATABASE_ID = os.getenv("NOTION_TASKS_DATABASE_ID")
 NOTION_MOVIES_DATABASE_ID = os.getenv("NOTION_MOVIES_DATABASE_ID")
 NOTION_BOOKS_DATABASE_ID = os.getenv("NOTION_BOOKS_DATABASE_ID")
+NOTION_QUOTES_DATABASE_ID = os.getenv("NOTION_QUOTES_DATABASE_ID")
 
 if NOTION_API_KEY is None:
     raise RuntimeError("NOTION_API_KEY tem de estar definido nas variáveis de ambiente.")
@@ -26,7 +27,6 @@ if NOTION_TASKS_DATABASE_ID is None:
 notion = NotionClient(auth=NOTION_API_KEY)
 
 app = FastAPI(title="Mia Notion API")
-
 
 # ============================================================
 #  MODELOS – TASK HUB (tarefas)
@@ -98,6 +98,11 @@ def _extract_select_name(prop: dict) -> Optional[str]:
     return sel.get("name")
 
 
+def _extract_multi_select_names(prop: dict) -> List[str]:
+    ms = prop.get("multi_select") or []
+    return [opt.get("name") for opt in ms]
+
+
 def _extract_date_start(prop: dict) -> Optional[str]:
     date_val = prop.get("date")
     if not date_val:
@@ -105,12 +110,13 @@ def _extract_date_start(prop: dict) -> Optional[str]:
     return date_val.get("start")
 
 
-def _extract_number(prop: dict) -> Optional[int]:
+def _extract_number(prop: dict):
     return prop.get("number")
 
 
 def _extract_checkbox(prop: dict) -> Optional[bool]:
-    # Para propriedades checkbox (Livros Hub: "Já Li")
+    if not prop:
+        return None
     return prop.get("checkbox")
 
 
@@ -207,11 +213,7 @@ def query_notion_tasks(
 ):
     """
     Consulta tarefas na Task Hub filtradas por Data Planeada (principal) ou Deadline.
-
-    - Usa planned_date para perguntas do tipo "tarefas para hoje/amanhã/dia X".
-    - Usa deadline_date apenas para perguntas sobre prazos de conclusão de tarefas.
     """
-
     if not planned_date and not deadline_date:
         raise HTTPException(
             status_code=400,
@@ -241,7 +243,6 @@ def query_notion_tasks(
         )
 
     tasks = [page_to_task_summary(page) for page in result.get("results", [])]
-
     return QueryTasksResponse(tasks=tasks)
 
 
@@ -276,9 +277,7 @@ def update_notion_task(
         properties["Deadline"] = {"date": {"start": body.deadline}}
 
     if body.duration is not None:
-        properties["Duração Estimada (min)"] = {
-            "number": body.duration
-        }
+        properties["Duração Estimada (min)"] = {"number": body.duration}
 
     if body.energy_required is not None:
         properties["Energia Necessária"] = {
@@ -353,8 +352,10 @@ def _movies_db_or_500() -> str:
     if not NOTION_MOVIES_DATABASE_ID:
         raise HTTPException(
             status_code=500,
-            detail="NOTION_MOVIES_DATABASE_ID não está definido. "
-                   "Configura o ID da base 'Filmes Hub' nas variáveis de ambiente.",
+            detail=(
+                "NOTION_MOVIES_DATABASE_ID não está definido. "
+                "Configura o ID da base 'Filmes Hub' nas variáveis de ambiente."
+            ),
         )
     return NOTION_MOVIES_DATABASE_ID
 
@@ -363,8 +364,7 @@ def build_movie_properties(body: CreateMovieRequest):
     """
     Mapeia o pedido para as propriedades da base Filmes Hub.
 
-    Ajusta os nomes das propriedades aos da tua base Notion.
-    Aqui assumimos:
+    Assumido:
       - Título (title)
       - Estado (select)
       - Notas (rich_text)
@@ -432,7 +432,6 @@ def list_movies(
 ):
     """
     Lista filmes da base 'Filmes Hub'.
-    A Mia pode usar este endpoint para sugerir um filme com base no contexto.
     """
     database_id = _movies_db_or_500()
 
@@ -471,7 +470,7 @@ def update_movie(
     """
     Actualiza um registo na base Filmes Hub (por ex., marcar como 'Visto').
     """
-    _movies_db_or_500()  # só para garantir que está configurado
+    _movies_db_or_500()
 
     properties = {}
 
@@ -548,8 +547,10 @@ def _books_db_or_500() -> str:
     if not NOTION_BOOKS_DATABASE_ID:
         raise HTTPException(
             status_code=500,
-            detail="NOTION_BOOKS_DATABASE_ID não está definido. "
-                   "Configura o ID da base 'Livros Hub' nas variáveis de ambiente.",
+            detail=(
+                "NOTION_BOOKS_DATABASE_ID não está definido. "
+                "Configura o ID da base 'Livros Hub' nas variáveis de ambiente."
+            ),
         )
     return NOTION_BOOKS_DATABASE_ID
 
@@ -558,10 +559,10 @@ def build_book_properties(body: CreateBookRequest):
     """
     Mapeia o pedido para as propriedades da base Livros Hub.
 
-    Na base Livros Hub assumimos:
+    Colunas:
       - Livro (title)
       - Já Li (checkbox)
-      - Notas (rich_text, opcional)
+      - Notas (rich_text)
     """
     props = {
         "Livro": {
@@ -621,7 +622,7 @@ def create_book(body: CreateBookRequest):
 def list_books(
     read: Optional[bool] = Query(
         None,
-        description="Se true, só livros já lidos; se false, só livros por ler; se omitido, todos.",
+        description="true = já lidos, false = por ler, omitido = todos.",
     )
 ):
     """
@@ -664,7 +665,7 @@ def update_book(
     """
     Actualiza um registo na base Livros Hub (por ex., marcar como lido).
     """
-    _books_db_or_500()  # só para garantir que está configurado
+    _books_db_or_500()
 
     properties = {}
 
@@ -697,5 +698,285 @@ def update_book(
 
     return UpdateBookResponse(
         book_id=bookId,
+        updated_fields=list(properties.keys()),
+    )
+
+
+# ============================================================
+#  MODELOS – FRASES HUB
+# ============================================================
+
+class CreateQuoteRequest(BaseModel):
+    quote_text: str
+    author: Optional[str] = None
+    tags: Optional[List[str]] = None
+    source: Optional[str] = None
+    favorite: Optional[bool] = None
+    notes: Optional[str] = None
+
+
+class QuoteSummary(BaseModel):
+    quote_id: str
+    text: Optional[str] = None
+    author: Optional[str] = None
+    tags: List[str] = []
+    source: Optional[str] = None
+    favorite: Optional[bool] = None
+    url: Optional[str] = None
+
+
+class QueryQuotesResponse(BaseModel):
+    quotes: List[QuoteSummary]
+
+
+class UpdateQuoteRequest(BaseModel):
+    quote_text: Optional[str] = None
+    author: Optional[str] = None
+    tags: Optional[List[str]] = None
+    source: Optional[str] = None
+    favorite: Optional[bool] = None
+    notes: Optional[str] = None
+
+
+class UpdateQuoteResponse(BaseModel):
+    quote_id: str
+    updated_fields: List[str]
+
+
+# ============================================================
+#  HELPERS – FRASES HUB
+# ============================================================
+
+def _quotes_db_or_500() -> str:
+    if not NOTION_QUOTES_DATABASE_ID:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "NOTION_QUOTES_DATABASE_ID não está definido. "
+                "Configura o ID da base 'Frases Hub' nas variáveis de ambiente."
+            ),
+        )
+    return NOTION_QUOTES_DATABASE_ID
+
+
+def build_quote_properties(body: CreateQuoteRequest):
+    """
+    Mapeia o pedido para as propriedades da base Frases Hub.
+
+    Colunas:
+      - Frase (title)
+      - Autor (text)
+      - Tags (multi-select)
+      - Fonte (text)
+      - Notas (rich_text)
+      - Favorita (checkbox)
+    """
+    props = {
+        "Frase": {
+            "title": [{"text": {"content": body.quote_text}}],
+        }
+    }
+
+    if body.author:
+        props["Autor"] = {"rich_text": [{"text": {"content": body.author}}]}
+
+    if body.tags:
+        props["Tags"] = {
+            "multi_select": [{"name": tag} for tag in body.tags]
+        }
+
+    if body.source:
+        props["Fonte"] = {"rich_text": [{"text": {"content": body.source}}]}
+
+    if body.notes:
+        props["Notas"] = {"rich_text": [{"text": {"content": body.notes}}]}
+
+    if body.favorite is not None:
+        props["Favorita"] = {"checkbox": bool(body.favorite)}
+
+    return props
+
+
+def page_to_quote_summary(page: dict) -> QuoteSummary:
+    props = page.get("properties", {})
+
+    text = _extract_title(props.get("Frase", {}))
+    # Autor guardado como rich_text:
+    author_prop = props.get("Autor", {})
+    author_text = ""
+    rt = author_prop.get("rich_text") or []
+    if rt:
+        author_text = "".join([t.get("plain_text", "") for t in rt])
+
+    tags = _extract_multi_select_names(props.get("Tags", {}))
+    source_prop = props.get("Fonte", {})
+    source_text = ""
+    rt2 = source_prop.get("rich_text") or []
+    if rt2:
+        source_text = "".join([t.get("plain_text", "") for t in rt2])
+
+    favorite = _extract_checkbox(props.get("Favorita", {}))
+
+    return QuoteSummary(
+        quote_id=page.get("id"),
+        text=text,
+        author=author_text or None,
+        tags=tags,
+        source=source_text or None,
+        favorite=favorite,
+        url=page.get("url"),
+    )
+
+
+# ============================================================
+#  ENDPOINTS – FRASES HUB
+# ============================================================
+
+@app.post("/notion/quotes", response_model=QuoteSummary)
+def create_quote(body: CreateQuoteRequest):
+    """
+    Cria uma nova frase inspiradora na base 'Frases Hub'.
+    """
+    database_id = _quotes_db_or_500()
+
+    try:
+        props = build_quote_properties(body)
+        page = notion.pages.create(
+            parent={"database_id": database_id},
+            properties=props,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Erro ao criar frase no Notion: {e}",
+        )
+
+    return page_to_quote_summary(page)
+
+
+@app.get("/notion/quotes", response_model=QueryQuotesResponse)
+def list_quotes(
+    favorite: Optional[bool] = Query(
+        None,
+        description="true = só favoritas, false = só não marcadas, omitido = todas.",
+    ),
+    tag: Optional[str] = Query(
+        None,
+        description="Filtrar por um Tag específico.",
+    ),
+    author: Optional[str] = Query(
+        None,
+        description="Filtrar por autor (match simples no texto do autor).",
+    ),
+):
+    """
+    Lista frases da base 'Frases Hub', com filtros opcionais.
+    """
+    database_id = _quotes_db_or_500()
+
+    filters = []
+
+    if favorite is not None:
+        filters.append({
+            "property": "Favorita",
+            "checkbox": {"equals": bool(favorite)},
+        })
+
+    if tag:
+        filters.append({
+            "property": "Tags",
+            "multi_select": {"contains": tag},
+        })
+
+    # Filtro de autor via rich_text "contains"
+    if author:
+        filters.append({
+            "property": "Autor",
+            "rich_text": {"contains": author},
+        })
+
+    filter_obj = None
+    if len(filters) == 1:
+        filter_obj = filters[0]
+    elif len(filters) > 1:
+        filter_obj = {"and": filters}
+
+    try:
+        if filter_obj:
+            result = notion.databases.query(
+                database_id=database_id,
+                filter=filter_obj,
+            )
+        else:
+            result = notion.databases.query(
+                database_id=database_id,
+            )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao consultar frases: {e}",
+        )
+
+    quotes = [page_to_quote_summary(page) for page in result.get("results", [])]
+    return QueryQuotesResponse(quotes=quotes)
+
+
+@app.patch("/notion/quotes/{quoteId}", response_model=UpdateQuoteResponse)
+def update_quote(
+    body: UpdateQuoteRequest,
+    quoteId: str = Path(..., description="ID da frase na base Frases Hub"),
+):
+    """
+    Actualiza uma frase existente na base 'Frases Hub'.
+    Pode alterar texto, autor, tags, fonte, notas, favorita.
+    """
+    _quotes_db_or_500()
+
+    properties = {}
+
+    if body.quote_text is not None:
+        properties["Frase"] = {
+            "title": [{"text": {"content": body.quote_text}}],
+        }
+
+    if body.author is not None:
+        properties["Autor"] = {
+            "rich_text": [{"text": {"content": body.author}}],
+        }
+
+    if body.tags is not None:
+        properties["Tags"] = {
+            "multi_select": [{"name": tag} for tag in body.tags]
+        }
+
+    if body.source is not None:
+        properties["Fonte"] = {
+            "rich_text": [{"text": {"content": body.source}}],
+        }
+
+    if body.notes is not None:
+        properties["Notas"] = {
+            "rich_text": [{"text": {"content": body.notes}}],
+        }
+
+    if body.favorite is not None:
+        properties["Favorita"] = {"checkbox": bool(body.favorite)}
+
+    if not properties:
+        raise HTTPException(
+            status_code=400,
+            detail="Nenhum campo para actualizar.",
+        )
+
+    try:
+        notion.pages.update(page_id=quoteId, properties=properties)
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Erro ao actualizar frase no Notion: {e}",
+        )
+
+    return UpdateQuoteResponse(
+        quote_id=quoteId,
         updated_fields=list(properties.keys()),
     )
