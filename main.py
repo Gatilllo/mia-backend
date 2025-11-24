@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from notion_client import Client as NotionClient
 
 # ============================================================
-#  Carregar variáveis de ambiente
+#  Variáveis de ambiente / Notion
 # ============================================================
 load_dotenv()
 
@@ -21,10 +21,26 @@ if NOTION_API_KEY is None:
 if NOTION_TASKS_DATABASE_ID is None:
     raise RuntimeError("NOTION_TASKS_DATABASE_ID tem de estar definido nas variáveis de ambiente.")
 
-# Cliente oficial do Notion
+# NOTION_MOVIES_DATABASE_ID é opcional (depende se configuraste Filmes Hub ou não)
+
 notion = NotionClient(auth=NOTION_API_KEY)
 
 app = FastAPI(title="Mia Notion API")
+
+# Constantes para nomes de propriedades no Notion
+TASK_TITLE_PROP = "Tarefa"
+TASK_PRIORITY_PROP = "Prioridade"
+TASK_PLANNED_DATE_PROP = "Data Planeada"
+TASK_DEADLINE_PROP = "Deadline"
+TASK_DURATION_PROP = "Duração Estimada (min)"
+TASK_ENERGY_PROP = "Energia Necessária"
+TASK_AREA_PROP = "Área da Vida"
+TASK_STATE_PROP = "Estado"
+TASK_NOTES_PROP = "Notas"
+
+MOVIE_TITLE_PROP = "Filme"
+MOVIE_WATCHED_PROP = "Já Vi"
+MOVIE_NOTES_PROP = "Notas"
 
 
 # ============================================================
@@ -84,36 +100,32 @@ class QueryTasksResponse(BaseModel):
 # ============================================================
 
 def build_notion_task_properties(body: CreateNotionTaskRequest):
-    """
-    Constrói o dicionário de propriedades exactamente com os
-    nomes de colunas da base Task Hub no Notion.
-    """
     props = {
-        "Tarefa": {
+        TASK_TITLE_PROP: {
             "title": [{"text": {"content": body.task_title}}],
         }
     }
 
     if body.priority:
-        props["Prioridade"] = {"select": {"name": body.priority}}
+        props[TASK_PRIORITY_PROP] = {"select": {"name": body.priority}}
 
     if body.planned_date:
-        props["Data Planeada"] = {"date": {"start": body.planned_date}}
+        props[TASK_PLANNED_DATE_PROP] = {"date": {"start": body.planned_date}}
 
     if body.deadline:
-        props["Deadline"] = {"date": {"start": body.deadline}}
+        props[TASK_DEADLINE_PROP] = {"date": {"start": body.deadline}}
 
     if body.duration is not None:
-        props["Duração Estimada (min)"] = {"number": body.duration}
+        props[TASK_DURATION_PROP] = {"number": body.duration}
 
     if body.energy_required:
-        props["Energia Necessária"] = {"select": {"name": body.energy_required}}
+        props[TASK_ENERGY_PROP] = {"select": {"name": body.energy_required}}
 
     if body.area:
-        props["Área da Vida"] = {"select": {"name": body.area}}
+        props[TASK_AREA_PROP] = {"select": {"name": body.area}}
 
     if body.notes:
-        props["Notas"] = {"rich_text": [{"text": {"content": body.notes}}]}
+        props[TASK_NOTES_PROP] = {"rich_text": [{"text": {"content": body.notes}}]}
 
     return props
 
@@ -139,12 +151,9 @@ def _extract_date_start(prop: dict) -> Optional[str]:
     return date_val.get("start")
 
 
-def _extract_number(prop: dict) -> Optional[float]:
-    return prop.get("number")
-
-
 def _extract_checkbox(prop: dict) -> Optional[bool]:
-    # Notion devolve {"checkbox": true/false}
+    if not prop:
+        return None
     return prop.get("checkbox")
 
 
@@ -152,12 +161,12 @@ def page_to_task_summary(page: dict) -> TaskSummary:
     props = page.get("properties", {})
     return TaskSummary(
         task_id=page.get("id"),
-        task_title=_extract_title(props.get("Tarefa", {})),
-        planned_date=_extract_date_start(props.get("Data Planeada", {})),
-        deadline=_extract_date_start(props.get("Deadline", {})),
-        priority=_extract_select_name(props.get("Prioridade", {})),
-        state=_extract_select_name(props.get("Estado", {})),
-        area=_extract_select_name(props.get("Área da Vida", {})),
+        task_title=_extract_title(props.get(TASK_TITLE_PROP, {})),
+        planned_date=_extract_date_start(props.get(TASK_PLANNED_DATE_PROP, {})),
+        deadline=_extract_date_start(props.get(TASK_DEADLINE_PROP, {})),
+        priority=_extract_select_name(props.get(TASK_PRIORITY_PROP, {})),
+        state=_extract_select_name(props.get(TASK_STATE_PROP, {})),
+        area=_extract_select_name(props.get(TASK_AREA_PROP, {})),
         url=page.get("url"),
     )
 
@@ -168,9 +177,7 @@ def page_to_task_summary(page: dict) -> TaskSummary:
 
 @app.post("/notion/tasks", response_model=CreateNotionTaskResponse)
 def create_notion_task(body: CreateNotionTaskRequest):
-    """
-    Cria uma nova tarefa na base Task Hub.
-    """
+    """Cria uma nova tarefa na base Task Hub."""
     try:
         props = build_notion_task_properties(body)
         page = notion.pages.create(
@@ -202,11 +209,7 @@ def query_notion_tasks(
 ):
     """
     Consulta tarefas na Task Hub filtradas por Data Planeada (principal) ou Deadline.
-
-    - Usa planned_date para perguntas do tipo "tarefas para hoje/amanhã/dia X".
-    - Usa deadline_date apenas para perguntas sobre prazos de conclusão de tarefas.
     """
-
     if not planned_date and not deadline_date:
         raise HTTPException(
             status_code=400,
@@ -215,12 +218,12 @@ def query_notion_tasks(
 
     if planned_date:
         filter_obj = {
-            "property": "Data Planeada",
+            "property": TASK_PLANNED_DATE_PROP,
             "date": {"equals": planned_date},
         }
     else:
         filter_obj = {
-            "property": "Deadline",
+            "property": TASK_DEADLINE_PROP,
             "date": {"equals": deadline_date},
         }
 
@@ -236,7 +239,6 @@ def query_notion_tasks(
         )
 
     tasks = [page_to_task_summary(page) for page in result.get("results", [])]
-
     return QueryTasksResponse(tasks=tasks)
 
 
@@ -252,39 +254,37 @@ def update_notion_task(
     properties = {}
 
     if body.task_title is not None:
-        properties["Tarefa"] = {
+        properties[TASK_TITLE_PROP] = {
             "title": [{"text": {"content": body.task_title}}]
         }
 
     if body.status is not None:
-        properties["Estado"] = {"select": {"name": body.status}}
+        properties[TASK_STATE_PROP] = {"select": {"name": body.status}}
 
     if body.priority is not None:
-        properties["Prioridade"] = {"select": {"name": body.priority}}
+        properties[TASK_PRIORITY_PROP] = {"select": {"name": body.priority}}
 
     if body.planned_date is not None:
-        properties["Data Planeada"] = {
+        properties[TASK_PLANNED_DATE_PROP] = {
             "date": {"start": body.planned_date}
         }
 
     if body.deadline is not None:
-        properties["Deadline"] = {"date": {"start": body.deadline}}
+        properties[TASK_DEADLINE_PROP] = {"date": {"start": body.deadline}}
 
     if body.duration is not None:
-        properties["Duração Estimada (min)"] = {
-            "number": body.duration
-        }
+        properties[TASK_DURATION_PROP] = {"number": body.duration}
 
     if body.energy_required is not None:
-        properties["Energia Necessária"] = {
+        properties[TASK_ENERGY_PROP] = {
             "select": {"name": body.energy_required}
         }
 
     if body.area is not None:
-        properties["Área da Vida"] = {"select": {"name": body.area}}
+        properties[TASK_AREA_PROP] = {"select": {"name": body.area}}
 
     if body.notes is not None:
-        properties["Notas"] = {
+        properties[TASK_NOTES_PROP] = {
             "rich_text": [{"text": {"content": body.notes}}]
         }
 
@@ -310,31 +310,21 @@ def update_notion_task(
 
 # ============================================================
 #  MODELOS – FILMES HUB
-#  (alinhado com as colunas: Filme, Categoria, Energia Necessária,
-#   Mood Ideal, Duração, Já Vi, Data Visto, Avaliação)
 # ============================================================
 
 class CreateMovieRequest(BaseModel):
     title: str
-    category: Optional[str] = None           # ex.: Drama, Comédia, Documentário...
-    energy_required: Optional[str] = None    # ex.: Baixa, Média, Alta
-    ideal_mood: Optional[str] = None         # ex.: Motivado, Cansado, Família...
-    duration: Optional[int] = None           # minutos
-    watched: Optional[bool] = None           # mapeia para checkbox "Já Vi"
-    watched_date: Optional[str] = None       # YYYY-MM-DD -> "Data Visto"
-    rating: Optional[float] = None           # Avaliação numérica (0–10, por ex.)
+    # opcional: "Visto" | "Por ver"
+    status: Optional[str] = None
+    # atalho booleano: True = já vi, False = por ver
+    watched: Optional[bool] = None
+    notes: Optional[str] = None
 
 
 class MovieSummary(BaseModel):
     movie_id: str
     title: Optional[str] = None
-    category: Optional[str] = None
-    energy_required: Optional[str] = None
-    ideal_mood: Optional[str] = None
-    duration: Optional[int] = None
     watched: Optional[bool] = None
-    watched_date: Optional[str] = None
-    rating: Optional[float] = None
     url: Optional[str] = None
 
 
@@ -344,26 +334,14 @@ class QueryMoviesResponse(BaseModel):
 
 class UpdateMovieRequest(BaseModel):
     title: Optional[str] = None
-    category: Optional[str] = None
-    energy_required: Optional[str] = None
-    ideal_mood: Optional[str] = None
-    duration: Optional[int] = None
+    status: Optional[str] = None
     watched: Optional[bool] = None
-    watched_date: Optional[str] = None
-    rating: Optional[float] = None
+    notes: Optional[str] = None
 
 
 class UpdateMovieResponse(BaseModel):
     movie_id: str
     updated_fields: List[str]
-
-
-class BulkCreateMoviesRequest(BaseModel):
-    movies: List[CreateMovieRequest]
-
-
-class BulkCreateMoviesResponse(BaseModel):
-    movies: List[MovieSummary]
 
 
 # ============================================================
@@ -374,81 +352,69 @@ def _movies_db_or_500() -> str:
     if not NOTION_MOVIES_DATABASE_ID:
         raise HTTPException(
             status_code=500,
-            detail="NOTION_MOVIES_DATABASE_ID não está definido. "
-                   "Configura o ID da base 'Filmes Hub' nas variáveis de ambiente.",
+            detail=(
+                "NOTION_MOVIES_DATABASE_ID não está definido. "
+                "Configura o ID da base 'Filmes Hub' nas variáveis de ambiente."
+            ),
         )
     return NOTION_MOVIES_DATABASE_ID
+
+
+def _resolve_watched_from_status_and_flag(
+    status: Optional[str],
+    watched: Optional[bool],
+) -> Optional[bool]:
+    """
+    Converte status ("Visto" / "Por ver") + flag watched para um booleano final.
+    Priority: watched > status.
+    """
+    if watched is not None:
+        return watched
+
+    if not status:
+        return None
+
+    s = status.strip().lower()
+    if s in ("visto", "já vi", "ja vi"):
+        return True
+    if s in ("por ver", "não visto", "nao visto"):
+        return False
+
+    return None
 
 
 def build_movie_properties(body: CreateMovieRequest):
     """
     Mapeia o pedido para as propriedades da base Filmes Hub.
-
-    Colunas da base:
-      - Filme (title)
-      - Categoria (select)
-      - Energia Necessária (select)
-      - Mood Ideal (select)
-      - Duração (number)
-      - Já Vi (checkbox)
-      - Data Visto (date)
-      - Avaliação (number)
+    - Filme (title)
+    - Já Vi (checkbox)
+    - Notas (rich_text, opcional)
     """
     props = {
-        "Filme": {
+        MOVIE_TITLE_PROP: {
             "title": [{"text": {"content": body.title}}],
         }
     }
 
-    if body.category:
-        props["Categoria"] = {"select": {"name": body.category}}
+    watched_flag = _resolve_watched_from_status_and_flag(body.status, body.watched)
+    if watched_flag is not None:
+        props[MOVIE_WATCHED_PROP] = {"checkbox": watched_flag}
 
-    if body.energy_required:
-        props["Energia Necessária"] = {"select": {"name": body.energy_required}}
-
-    if body.ideal_mood:
-        props["Mood Ideal"] = {"select": {"name": body.ideal_mood}}
-
-    if body.duration is not None:
-        props["Duração"] = {"number": body.duration}
-
-    if body.watched is not None:
-        props["Já Vi"] = {"checkbox": body.watched}
-
-    if body.watched_date:
-        props["Data Visto"] = {"date": {"start": body.watched_date}}
-
-    if body.rating is not None:
-        props["Avaliação"] = {"number": body.rating}
+    if body.notes:
+        props[MOVIE_NOTES_PROP] = {"rich_text": [{"text": {"content": body.notes}}]}
 
     return props
 
 
 def page_to_movie_summary(page: dict) -> MovieSummary:
     props = page.get("properties", {})
-
-    title = _extract_title(props.get("Filme", {}))
-    category = _extract_select_name(props.get("Categoria", {}))
-    energy_required = _extract_select_name(props.get("Energia Necessária", {}))
-    ideal_mood = _extract_select_name(props.get("Mood Ideal", {}))
-    duration = _extract_number(props.get("Duração", {}))
-    watched = _extract_checkbox(props.get("Já Vi", {}))
-    watched_date = _extract_date_start(props.get("Data Visto", {}))
-    rating = _extract_number(props.get("Avaliação", {}))
-
-    # duration e rating vêm como float da API, aqui converto duration para int se existir
-    duration_int: Optional[int] = int(duration) if duration is not None else None
+    title = _extract_title(props.get(MOVIE_TITLE_PROP, {}))
+    watched = _extract_checkbox(props.get(MOVIE_WATCHED_PROP, {}))
 
     return MovieSummary(
         movie_id=page.get("id"),
         title=title,
-        category=category,
-        energy_required=energy_required,
-        ideal_mood=ideal_mood,
-        duration=duration_int,
         watched=watched,
-        watched_date=watched_date,
-        rating=rating,
         url=page.get("url"),
     )
 
@@ -461,9 +427,7 @@ def page_to_movie_summary(page: dict) -> MovieSummary:
 def create_movie(body: CreateMovieRequest):
     """
     Cria um novo registo na base 'Filmes Hub'.
-
-    Usado, por exemplo, quando o utilizador passa um único filme
-    (ou quando a Mia decide criar por partes).
+    Pode já vir marcado como visto (status='Visto' ou watched=true).
     """
     database_id = _movies_db_or_500()
 
@@ -482,50 +446,27 @@ def create_movie(body: CreateMovieRequest):
     return page_to_movie_summary(page)
 
 
-@app.post("/notion/movies/bulk", response_model=BulkCreateMoviesResponse)
-def create_movies_bulk(body: BulkCreateMoviesRequest):
-    """
-    Cria vários filmes de uma só vez na base 'Filmes Hub'.
-    A Mia pode usar isto quando extrai uma lista grande (por ex. de um post-it).
-    """
-    database_id = _movies_db_or_500()
-
-    created: List[MovieSummary] = []
-    try:
-        for movie in body.movies:
-            props = build_movie_properties(movie)
-            page = notion.pages.create(
-                parent={"database_id": database_id},
-                properties=props,
-            )
-            created.append(page_to_movie_summary(page))
-    except Exception as e:
-        # Se der erro a meio, devolve o que já foi criado e a mensagem
-        raise HTTPException(
-            status_code=400,
-            detail=f"Erro ao criar filmes no Notion: {e}",
-        )
-
-    return BulkCreateMoviesResponse(movies=created)
-
-
 @app.get("/notion/movies", response_model=QueryMoviesResponse)
 def list_movies(
     watched: Optional[bool] = Query(
         None,
-        description="Filtra por 'Já Vi' (true/false). Se vazio, devolve todos.",
+        description="Filtra por 'Já Vi' (true = visto, false = por ver). "
+        "Se vazio, devolve todos.",
     )
 ):
     """
     Lista filmes da base 'Filmes Hub'.
-    A Mia pode usar este endpoint para sugerir um filme com base no contexto / energia.
+    A Mia pode usar este endpoint para:
+      - saber o que já viste (watched=true)
+      - ou o que ainda tens por ver (watched=false)
+      - ou então listar todos (watched omitido).
     """
     database_id = _movies_db_or_500()
 
     filter_obj = None
     if watched is not None:
         filter_obj = {
-            "property": "Já Vi",
+            "property": MOVIE_WATCHED_PROP,
             "checkbox": {"equals": watched},
         }
 
@@ -555,39 +496,27 @@ def update_movie(
     movieId: str = Path(..., description="ID do filme na base Filmes Hub"),
 ):
     """
-    Actualiza um registo na base Filmes Hub (por ex., marcar como 'Já Vi').
+    Actualiza um registo na base Filmes Hub (por ex., marcar como 'já vi').
+    - Se vier watched=true/false, usamos isso directamente.
+    - Se vier status='Visto'/'Por ver', convertemos para o checkbox 'Já Vi'.
     """
-    _movies_db_or_500()  # só para garantir que está configurado
+    _movies_db_or_500()  # garante que está configurado
 
     properties = {}
 
     if body.title is not None:
-        properties["Filme"] = {
+        properties[MOVIE_TITLE_PROP] = {
             "title": [{"text": {"content": body.title}}],
         }
 
-    if body.category is not None:
-        properties["Categoria"] = {"select": {"name": body.category}}
+    watched_flag = _resolve_watched_from_status_and_flag(body.status, body.watched)
+    if watched_flag is not None:
+        properties[MOVIE_WATCHED_PROP] = {"checkbox": watched_flag}
 
-    if body.energy_required is not None:
-        properties["Energia Necessária"] = {
-            "select": {"name": body.energy_required}
+    if body.notes is not None:
+        properties[MOVIE_NOTES_PROP] = {
+            "rich_text": [{"text": {"content": body.notes}}]
         }
-
-    if body.ideal_mood is not None:
-        properties["Mood Ideal"] = {"select": {"name": body.ideal_mood}}
-
-    if body.duration is not None:
-        properties["Duração"] = {"number": body.duration}
-
-    if body.watched is not None:
-        properties["Já Vi"] = {"checkbox": body.watched}
-
-    if body.watched_date is not None:
-        properties["Data Visto"] = {"date": {"start": body.watched_date}}
-
-    if body.rating is not None:
-        properties["Avaliação"] = {"number": body.rating}
 
     if not properties:
         raise HTTPException(
