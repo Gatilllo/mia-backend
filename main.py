@@ -80,35 +80,6 @@ class QueryTasksResponse(BaseModel):
 
 
 # ============================================================
-#  HELPERS GENÉRICOS
-# ============================================================
-
-def _extract_title(prop: dict) -> Optional[str]:
-    title = prop.get("title")
-    if not title:
-        return None
-    return "".join(part.get("plain_text", "") for part in title)
-
-
-def _extract_select_name(prop: dict) -> Optional[str]:
-    sel = prop.get("select")
-    if not sel:
-        return None
-    return sel.get("name")
-
-
-def _extract_date_start(prop: dict) -> Optional[str]:
-    date_val = prop.get("date")
-    if not date_val:
-        return None
-    return date_val.get("start")
-
-
-def _extract_number(prop: dict) -> Optional[float]:
-    return prop.get("number")
-
-
-# ============================================================
 #  HELPERS – TASK HUB
 # ============================================================
 
@@ -145,6 +116,36 @@ def build_notion_task_properties(body: CreateNotionTaskRequest):
         props["Notas"] = {"rich_text": [{"text": {"content": body.notes}}]}
 
     return props
+
+
+def _extract_title(prop: dict) -> Optional[str]:
+    title = prop.get("title")
+    if not title:
+        return None
+    return "".join(part.get("plain_text", "") for part in title)
+
+
+def _extract_select_name(prop: dict) -> Optional[str]:
+    sel = prop.get("select")
+    if not sel:
+        return None
+    return sel.get("name")
+
+
+def _extract_date_start(prop: dict) -> Optional[str]:
+    date_val = prop.get("date")
+    if not date_val:
+        return None
+    return date_val.get("start")
+
+
+def _extract_number(prop: dict) -> Optional[float]:
+    return prop.get("number")
+
+
+def _extract_checkbox(prop: dict) -> Optional[bool]:
+    # Notion devolve {"checkbox": true/false}
+    return prop.get("checkbox")
 
 
 def page_to_task_summary(page: dict) -> TaskSummary:
@@ -308,18 +309,20 @@ def update_notion_task(
 
 
 # ============================================================
-#  MODELOS – FILMES HUB (alinhados com a tua base)
+#  MODELOS – FILMES HUB
+#  (alinhado com as colunas: Filme, Categoria, Energia Necessária,
+#   Mood Ideal, Duração, Já Vi, Data Visto, Avaliação)
 # ============================================================
 
 class CreateMovieRequest(BaseModel):
     title: str
-    category: Optional[str] = None           # mapeia para "Categoria" (select)
-    energy_required: Optional[str] = None    # "Energia Necessária" (select)
-    ideal_mood: Optional[str] = None         # "Mood Ideal" (select)
-    duration: Optional[int] = None           # "Duração" (minutos)
-    watched: Optional[bool] = None           # "Já Vi" (checkbox)
-    watched_date: Optional[str] = None       # "Data Visto" (YYYY-MM-DD)
-    rating: Optional[float] = None           # "Avaliação" (1-10, por ex.)
+    category: Optional[str] = None           # ex.: Drama, Comédia, Documentário...
+    energy_required: Optional[str] = None    # ex.: Baixa, Média, Alta
+    ideal_mood: Optional[str] = None         # ex.: Motivado, Cansado, Família...
+    duration: Optional[int] = None           # minutos
+    watched: Optional[bool] = None           # mapeia para checkbox "Já Vi"
+    watched_date: Optional[str] = None       # YYYY-MM-DD -> "Data Visto"
+    rating: Optional[float] = None           # Avaliação numérica (0–10, por ex.)
 
 
 class MovieSummary(BaseModel):
@@ -355,6 +358,14 @@ class UpdateMovieResponse(BaseModel):
     updated_fields: List[str]
 
 
+class BulkCreateMoviesRequest(BaseModel):
+    movies: List[CreateMovieRequest]
+
+
+class BulkCreateMoviesResponse(BaseModel):
+    movies: List[MovieSummary]
+
+
 # ============================================================
 #  HELPERS – FILMES HUB
 # ============================================================
@@ -373,7 +384,7 @@ def build_movie_properties(body: CreateMovieRequest):
     """
     Mapeia o pedido para as propriedades da base Filmes Hub.
 
-    Colunas actuais na tua base:
+    Colunas da base:
       - Filme (title)
       - Categoria (select)
       - Energia Necessária (select)
@@ -418,20 +429,23 @@ def page_to_movie_summary(page: dict) -> MovieSummary:
 
     title = _extract_title(props.get("Filme", {}))
     category = _extract_select_name(props.get("Categoria", {}))
-    energy = _extract_select_name(props.get("Energia Necessária", {}))
-    mood = _extract_select_name(props.get("Mood Ideal", {}))
+    energy_required = _extract_select_name(props.get("Energia Necessária", {}))
+    ideal_mood = _extract_select_name(props.get("Mood Ideal", {}))
     duration = _extract_number(props.get("Duração", {}))
-    watched = props.get("Já Vi", {}).get("checkbox")
+    watched = _extract_checkbox(props.get("Já Vi", {}))
     watched_date = _extract_date_start(props.get("Data Visto", {}))
     rating = _extract_number(props.get("Avaliação", {}))
+
+    # duration e rating vêm como float da API, aqui converto duration para int se existir
+    duration_int: Optional[int] = int(duration) if duration is not None else None
 
     return MovieSummary(
         movie_id=page.get("id"),
         title=title,
         category=category,
-        energy_required=energy,
-        ideal_mood=mood,
-        duration=int(duration) if duration is not None else None,
+        energy_required=energy_required,
+        ideal_mood=ideal_mood,
+        duration=duration_int,
         watched=watched,
         watched_date=watched_date,
         rating=rating,
@@ -448,8 +462,8 @@ def create_movie(body: CreateMovieRequest):
     """
     Cria um novo registo na base 'Filmes Hub'.
 
-    Usado, por exemplo, quando o utilizador passa uma lista de filmes
-    e quer guardar todos (alguns já como vistos).
+    Usado, por exemplo, quando o utilizador passa um único filme
+    (ou quando a Mia decide criar por partes).
     """
     database_id = _movies_db_or_500()
 
@@ -468,18 +482,43 @@ def create_movie(body: CreateMovieRequest):
     return page_to_movie_summary(page)
 
 
+@app.post("/notion/movies/bulk", response_model=BulkCreateMoviesResponse)
+def create_movies_bulk(body: BulkCreateMoviesRequest):
+    """
+    Cria vários filmes de uma só vez na base 'Filmes Hub'.
+    A Mia pode usar isto quando extrai uma lista grande (por ex. de um post-it).
+    """
+    database_id = _movies_db_or_500()
+
+    created: List[MovieSummary] = []
+    try:
+        for movie in body.movies:
+            props = build_movie_properties(movie)
+            page = notion.pages.create(
+                parent={"database_id": database_id},
+                properties=props,
+            )
+            created.append(page_to_movie_summary(page))
+    except Exception as e:
+        # Se der erro a meio, devolve o que já foi criado e a mensagem
+        raise HTTPException(
+            status_code=400,
+            detail=f"Erro ao criar filmes no Notion: {e}",
+        )
+
+    return BulkCreateMoviesResponse(movies=created)
+
+
 @app.get("/notion/movies", response_model=QueryMoviesResponse)
 def list_movies(
     watched: Optional[bool] = Query(
         None,
-        description="Filtra por 'Já Vi' (True/False). Se vazio, devolve todos.",
+        description="Filtra por 'Já Vi' (true/false). Se vazio, devolve todos.",
     )
 ):
     """
     Lista filmes da base 'Filmes Hub'.
-
-    A Mia pode usar este endpoint para sugerir um filme com base
-    no contexto / energia / se já foi visto ou não.
+    A Mia pode usar este endpoint para sugerir um filme com base no contexto / energia.
     """
     database_id = _movies_db_or_500()
 
@@ -531,7 +570,9 @@ def update_movie(
         properties["Categoria"] = {"select": {"name": body.category}}
 
     if body.energy_required is not None:
-        properties["Energia Necessária"] = {"select": {"name": body.energy_required}}
+        properties["Energia Necessária"] = {
+            "select": {"name": body.energy_required}
+        }
 
     if body.ideal_mood is not None:
         properties["Mood Ideal"] = {"select": {"name": body.ideal_mood}}
