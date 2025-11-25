@@ -968,6 +968,9 @@ def page_to_note_summary(page: dict) -> NoteSummary:
 
 @app.post("/notion/notes", response_model=NoteSummary)
 def create_note(body: CreateNoteRequest):
+    """
+    Cria uma nova nota na base 'Ideias & Notas Hub'.
+    """
     database_id = _notes_db_or_500()
 
     try:
@@ -996,6 +999,9 @@ def list_notes(
         description="Filtra por categoria.",
     ),
 ):
+    """
+    Lista notas da base 'Ideias & Notas Hub'.
+    """
     database_id = _notes_db_or_500()
 
     filters = []
@@ -1154,62 +1160,11 @@ class UpdateInvestmentResponse(BaseModel):
     updated_fields: List[str]
 
 
-def _compute_investment_derived(
-    quantity: Optional[float],
-    average_price_usd: Optional[float],
-    last_price_usd: Optional[float],
-    aportes_totais_usd: Optional[float],
-    saldo_atual_usd: Optional[float],
-    lucro_usd: Optional[float],
-    percent_lucro: Optional[float],
-):
-    """
-    Regras:
-    - Se não houver aportes_totais_usd, calcula = quantidade * preço médio
-    - Se não houver saldo_atual_usd, calcula = quantidade * último preço
-    - Se não houver lucro_usd, calcula = saldo_atual - aportes
-    - Se não houver percent_lucro, calcula = lucro / aportes * 100
-    Só calcula se tiver dados suficientes.
-    """
-    q = quantity
-    avg = average_price_usd
-    last = last_price_usd
-    aportes = aportes_totais_usd
-    saldo = saldo_atual_usd
-    lucro = lucro_usd
-    percent = percent_lucro
-
-    # Aportes Totais
-    if aportes is None and q is not None and avg is not None:
-        aportes = q * avg
-
-    # Saldo Atual
-    if saldo is None and q is not None and last is not None:
-        saldo = q * last
-
-    # Lucro
-    if lucro is None and saldo is not None and aportes is not None:
-        lucro = saldo - aportes
-
-    # % Lucro
-    if percent is None and lucro is not None and aportes not in (None, 0):
-        percent = (lucro / aportes) * 100.0
-
-    return aportes, saldo, lucro, percent
-
-
 def build_investment_properties_from_create(body: CreateInvestmentRequest):
-    # Calcula derivados se não vierem preenchidos
-    aportes, saldo, lucro, percent = _compute_investment_derived(
-        body.quantity,
-        body.average_price_usd,
-        body.last_price_usd,
-        body.aportes_totais_usd,
-        body.saldo_atual_usd,
-        body.lucro_usd,
-        body.percent_lucro,
-    )
-
+    """
+    Mapeia diretamente os campos do pedido para as colunas da base Investimentos Hub.
+    A Mia é responsável por calcular lucro/%lucro antes de enviar, se quiser.
+    """
     props = {
         "Ativo": {
             "title": [{"text": {"content": body.asset}}],
@@ -1221,88 +1176,59 @@ def build_investment_properties_from_create(body: CreateInvestmentRequest):
     if body.last_price_usd is not None:
         props["Último Preço Capturado (USD)"] = {"number": body.last_price_usd}
 
-    if aportes is not None:
-        props["Aportes Totais (USD)"] = {"number": aportes}
+    if body.aportes_totais_usd is not None:
+        props["Aportes Totais (USD)"] = {"number": body.aportes_totais_usd}
 
-    if saldo is not None:
-        props["Saldo Atual (USD)"] = {"number": saldo}
+    if body.saldo_atual_usd is not None:
+        props["Saldo Atual (USD)"] = {"number": body.saldo_atual_usd}
 
-    if lucro is not None:
-        props["Lucro (USD)"] = {"number": lucro}
+    if body.lucro_usd is not None:
+        props["Lucro (USD)"] = {"number": body.lucro_usd}
 
-    if percent is not None:
-        props["% Lucro"] = {"number": percent}
+    if body.percent_lucro is not None:
+        props["% Lucro"] = {"number": body.percent_lucro}
 
-    if body.tipo_ativo:
+    if body.tipo_ativo is not None:
         props["Tipo de Ativo"] = {"select": {"name": body.tipo_ativo}}
 
     return props
 
 
-def build_investment_properties_from_update(body: UpdateInvestmentRequest, existing: dict):
+def build_investment_properties_from_update(body: UpdateInvestmentRequest):
     """
-    Para update:
-    - lê valores existentes da página
-    - aplica overrides do body
-    - volta a calcular derivados e devolve properties para update
+    Só escreve os campos enviados; não recalcula nada.
+    A Mia faz as contas e envia os valores certos.
     """
-
-    props = existing.get("properties", {})
-
-    # Ler o que já existe na página
-    current_quantity = _extract_number(props.get("Quantidade", {}))
-    current_avg_price = _extract_number(props.get("Preço Médio (USD)", {}))
-    current_last_price = _extract_number(props.get("Último Preço Capturado (USD)", {}))
-    current_aportes = _extract_number(props.get("Aportes Totais (USD)", {}))
-    current_saldo = _extract_number(props.get("Saldo Atual (USD)", {}))
-    current_lucro = _extract_number(props.get("Lucro (USD)", {}))
-    current_percent = _extract_number(props.get("% Lucro", {}))
-
-    # Aplica overrides
-    q = body.quantity if body.quantity is not None else current_quantity
-    avg = body.average_price_usd if body.average_price_usd is not None else current_avg_price
-    last = body.last_price_usd if body.last_price_usd is not None else current_last_price
-    aportes = body.aportes_totais_usd if body.aportes_totais_usd is not None else current_aportes
-    saldo = body.saldo_atual_usd if body.saldo_atual_usd is not None else current_saldo
-    lucro = body.lucro_usd if body.lucro_usd is not None else current_lucro
-    percent = body.percent_lucro if body.percent_lucro is not None else current_percent
-
-    aportes, saldo, lucro, percent = _compute_investment_derived(
-        q, avg, last, aportes, saldo, lucro, percent
-    )
-
-    update_props = {}
+    props = {}
 
     if body.asset is not None:
-        update_props["Ativo"] = {
-            "title": [{"text": {"content": body.asset}}],
-        }
+        props["Ativo"] = {"title": [{"text": {"content": body.asset}}]}
 
-    if q is not None:
-        update_props["Quantidade"] = {"number": q}
+    if body.quantity is not None:
+        props["Quantidade"] = {"number": body.quantity}
 
-    if avg is not None:
-        update_props["Preço Médio (USD)"] = {"number": avg}
+    if body.average_price_usd is not None:
+        props["Preço Médio (USD)"] = {"number": body.average_price_usd}
 
-    if last is not None:
-        update_props["Último Preço Capturado (USD)"] = {"number": last}
+    if body.last_price_usd is not None:
+        props["Último Preço Capturado (USD)"] = {"number": body.last_price_usd}
 
-    if aportes is not None:
-        update_props["Aportes Totais (USD)"] = {"number": aportes}
+    if body.aportes_totais_usd is not None:
+        props["Aportes Totais (USD)"] = {"number": body.aportes_totais_usd}
 
-    if saldo is not None:
-        update_props["Saldo Atual (USD)"] = {"number": saldo}
+    if body.saldo_atual_usd is not None:
+        props["Saldo Atual (USD)"] = {"number": body.saldo_atual_usd}
 
-    if lucro is not None:
-        update_props["Lucro (USD)"] = {"number": lucro}
+    if body.lucro_usd is not None:
+        props["Lucro (USD)"] = {"number": body.lucro_usd}
 
-    if percent is not None:
-        update_props["% Lucro"] = {"number": percent}
+    if body.percent_lucro is not None:
+        props["% Lucro"] = {"number": body.percent_lucro}
 
     if body.tipo_ativo is not None:
-        update_props["Tipo de Ativo"] = {"select": {"name": body.tipo_ativo}}
+        props["Tipo de Ativo"] = {"select": {"name": body.tipo_ativo}}
 
-    return update_props
+    return props
 
 
 def page_to_investment_summary(page: dict) -> InvestmentSummary:
@@ -1343,10 +1269,10 @@ def create_investment(body: CreateInvestmentRequest):
 @app.get("/notion/investments", response_model=QueryInvestmentsResponse)
 def list_investments(
     asset: Optional[str] = Query(
-        None, description="Filtra por nome do ativo (Ativo contém este texto)."
+        None, description="Filtra por nome do ativo (campo 'Ativo' contém este texto)."
     ),
     only_profitable: Optional[bool] = Query(
-        None, description="Se true, só devolve Lucro (USD) > 0; se false, < 0; se None, todos."
+        None, description="true → Lucro (USD) > 0; false → Lucro (USD) < 0; None → todos."
     ),
 ):
     database_id = _investments_db_or_500()
@@ -1385,7 +1311,9 @@ def list_investments(
                 filter=filter_obj,
             )
         else:
-            result = notion.databases.query(database_id=database_id)
+            result = notion.databases.query(
+                database_id=database_id,
+            )
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -1401,18 +1329,9 @@ def update_investment(
     body: UpdateInvestmentRequest,
     investmentId: str = Path(..., description="ID do investimento na base Investimentos Hub"),
 ):
-    database_id = _investments_db_or_500()
+    _investments_db_or_500()
 
-    # Primeiro, obter a página existente para ler valores atuais
-    try:
-        page = notion.pages.retrieve(investmentId)
-    except Exception as e:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Investimento não encontrado: {e}",
-        )
-
-    properties = build_investment_properties_from_update(body, page)
+    properties = build_investment_properties_from_update(body)
 
     if not properties:
         raise HTTPException(
