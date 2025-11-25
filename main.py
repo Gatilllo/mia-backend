@@ -18,6 +18,7 @@ NOTION_MOVIES_DATABASE_ID = os.getenv("NOTION_MOVIES_DATABASE_ID")
 NOTION_BOOKS_DATABASE_ID = os.getenv("NOTION_BOOKS_DATABASE_ID")
 NOTION_QUOTES_DATABASE_ID = os.getenv("NOTION_QUOTES_DATABASE_ID")
 NOTION_NOTES_DATABASE_ID = os.getenv("NOTION_NOTES_DATABASE_ID")
+NOTION_INVESTMENTS_DATABASE_ID = os.getenv("NOTION_INVESTMENTS_DATABASE_ID")
 
 if NOTION_API_KEY is None:
     raise RuntimeError("NOTION_API_KEY tem de estar definido nas variáveis de ambiente.")
@@ -868,7 +869,7 @@ def update_quote(
 
 
 # ============================================================
-#  IDEIAS & NOTAS HUB  (NOVA TABELA)
+#  IDEIAS & NOTAS HUB
 # ============================================================
 
 def _notes_db_or_500() -> str:
@@ -922,18 +923,6 @@ class UpdateNoteResponse(BaseModel):
 
 
 def build_note_properties(body: CreateNoteRequest):
-    """
-    IMPORTANTE: aqui usamos exactamente os nomes das colunas
-    que aparecem na tua tabela:
-
-      - "Título / Nota"        (title)
-      - "Categoria"           (select)
-      - "Energia emocional"   (select)
-      - "Impacto"             (select ou número)
-      - "Favorito"            (checkbox)
-      - "Data"                (date)
-      - "Notas detalhadas"    (rich_text)
-    """
     props = {
         "Título / Nota": {
             "title": [{"text": {"content": body.title}}],
@@ -979,9 +968,6 @@ def page_to_note_summary(page: dict) -> NoteSummary:
 
 @app.post("/notion/notes", response_model=NoteSummary)
 def create_note(body: CreateNoteRequest):
-    """
-    Cria uma nova nota na base 'Ideias & Notas Hub'.
-    """
     database_id = _notes_db_or_500()
 
     try:
@@ -1010,9 +996,6 @@ def list_notes(
         description="Filtra por categoria.",
     ),
 ):
-    """
-    Lista notas da base 'Ideias & Notas Hub'.
-    """
     database_id = _notes_db_or_500()
 
     filters = []
@@ -1106,5 +1089,346 @@ def update_note(
 
     return UpdateNoteResponse(
         note_id=noteId,
+        updated_fields=list(properties.keys()),
+    )
+
+
+# ============================================================
+#  INVESTIMENTOS HUB
+# ============================================================
+
+def _investments_db_or_500() -> str:
+    if not NOTION_INVESTMENTS_DATABASE_ID:
+        raise HTTPException(
+            status_code=500,
+            detail="NOTION_INVESTMENTS_DATABASE_ID não está definido. "
+                   "Configura o ID da base 'Investimentos Hub' nas variáveis de ambiente.",
+        )
+    return NOTION_INVESTMENTS_DATABASE_ID
+
+
+class CreateInvestmentRequest(BaseModel):
+    asset: str                      # Ativo
+    quantity: float                 # Quantidade
+    average_price_usd: float        # Preço Médio (USD)
+    last_price_usd: Optional[float] = None           # Último Preço Capturado (USD)
+    aportes_totais_usd: Optional[float] = None       # Aportes Totais (USD)
+    saldo_atual_usd: Optional[float] = None          # Saldo Atual (USD)
+    lucro_usd: Optional[float] = None                # Lucro (USD)
+    percent_lucro: Optional[float] = None            # % Lucro
+    tipo_ativo: Optional[str] = None                 # Tipo de Ativo (select)
+
+
+class InvestmentSummary(BaseModel):
+    investment_id: str
+    asset: Optional[str] = None
+    quantity: Optional[float] = None
+    average_price_usd: Optional[float] = None
+    last_price_usd: Optional[float] = None
+    aportes_totais_usd: Optional[float] = None
+    saldo_atual_usd: Optional[float] = None
+    lucro_usd: Optional[float] = None
+    percent_lucro: Optional[float] = None
+    tipo_ativo: Optional[str] = None
+    url: Optional[str] = None
+
+
+class QueryInvestmentsResponse(BaseModel):
+    investments: List[InvestmentSummary]
+
+
+class UpdateInvestmentRequest(BaseModel):
+    asset: Optional[str] = None
+    quantity: Optional[float] = None
+    average_price_usd: Optional[float] = None
+    last_price_usd: Optional[float] = None
+    aportes_totais_usd: Optional[float] = None
+    saldo_atual_usd: Optional[float] = None
+    lucro_usd: Optional[float] = None
+    percent_lucro: Optional[float] = None
+    tipo_ativo: Optional[str] = None
+
+
+class UpdateInvestmentResponse(BaseModel):
+    investment_id: str
+    updated_fields: List[str]
+
+
+def _compute_investment_derived(
+    quantity: Optional[float],
+    average_price_usd: Optional[float],
+    last_price_usd: Optional[float],
+    aportes_totais_usd: Optional[float],
+    saldo_atual_usd: Optional[float],
+    lucro_usd: Optional[float],
+    percent_lucro: Optional[float],
+):
+    """
+    Regras:
+    - Se não houver aportes_totais_usd, calcula = quantidade * preço médio
+    - Se não houver saldo_atual_usd, calcula = quantidade * último preço
+    - Se não houver lucro_usd, calcula = saldo_atual - aportes
+    - Se não houver percent_lucro, calcula = lucro / aportes * 100
+    Só calcula se tiver dados suficientes.
+    """
+    q = quantity
+    avg = average_price_usd
+    last = last_price_usd
+    aportes = aportes_totais_usd
+    saldo = saldo_atual_usd
+    lucro = lucro_usd
+    percent = percent_lucro
+
+    # Aportes Totais
+    if aportes is None and q is not None and avg is not None:
+        aportes = q * avg
+
+    # Saldo Atual
+    if saldo is None and q is not None and last is not None:
+        saldo = q * last
+
+    # Lucro
+    if lucro is None and saldo is not None and aportes is not None:
+        lucro = saldo - aportes
+
+    # % Lucro
+    if percent is None and lucro is not None and aportes not in (None, 0):
+        percent = (lucro / aportes) * 100.0
+
+    return aportes, saldo, lucro, percent
+
+
+def build_investment_properties_from_create(body: CreateInvestmentRequest):
+    # Calcula derivados se não vierem preenchidos
+    aportes, saldo, lucro, percent = _compute_investment_derived(
+        body.quantity,
+        body.average_price_usd,
+        body.last_price_usd,
+        body.aportes_totais_usd,
+        body.saldo_atual_usd,
+        body.lucro_usd,
+        body.percent_lucro,
+    )
+
+    props = {
+        "Ativo": {
+            "title": [{"text": {"content": body.asset}}],
+        },
+        "Quantidade": {"number": body.quantity},
+        "Preço Médio (USD)": {"number": body.average_price_usd},
+    }
+
+    if body.last_price_usd is not None:
+        props["Último Preço Capturado (USD)"] = {"number": body.last_price_usd}
+
+    if aportes is not None:
+        props["Aportes Totais (USD)"] = {"number": aportes}
+
+    if saldo is not None:
+        props["Saldo Atual (USD)"] = {"number": saldo}
+
+    if lucro is not None:
+        props["Lucro (USD)"] = {"number": lucro}
+
+    if percent is not None:
+        props["% Lucro"] = {"number": percent}
+
+    if body.tipo_ativo:
+        props["Tipo de Ativo"] = {"select": {"name": body.tipo_ativo}}
+
+    return props
+
+
+def build_investment_properties_from_update(body: UpdateInvestmentRequest, existing: dict):
+    """
+    Para update:
+    - lê valores existentes da página
+    - aplica overrides do body
+    - volta a calcular derivados e devolve properties para update
+    """
+
+    props = existing.get("properties", {})
+
+    # Ler o que já existe na página
+    current_quantity = _extract_number(props.get("Quantidade", {}))
+    current_avg_price = _extract_number(props.get("Preço Médio (USD)", {}))
+    current_last_price = _extract_number(props.get("Último Preço Capturado (USD)", {}))
+    current_aportes = _extract_number(props.get("Aportes Totais (USD)", {}))
+    current_saldo = _extract_number(props.get("Saldo Atual (USD)", {}))
+    current_lucro = _extract_number(props.get("Lucro (USD)", {}))
+    current_percent = _extract_number(props.get("% Lucro", {}))
+
+    # Aplica overrides
+    q = body.quantity if body.quantity is not None else current_quantity
+    avg = body.average_price_usd if body.average_price_usd is not None else current_avg_price
+    last = body.last_price_usd if body.last_price_usd is not None else current_last_price
+    aportes = body.aportes_totais_usd if body.aportes_totais_usd is not None else current_aportes
+    saldo = body.saldo_atual_usd if body.saldo_atual_usd is not None else current_saldo
+    lucro = body.lucro_usd if body.lucro_usd is not None else current_lucro
+    percent = body.percent_lucro if body.percent_lucro is not None else current_percent
+
+    aportes, saldo, lucro, percent = _compute_investment_derived(
+        q, avg, last, aportes, saldo, lucro, percent
+    )
+
+    update_props = {}
+
+    if body.asset is not None:
+        update_props["Ativo"] = {
+            "title": [{"text": {"content": body.asset}}],
+        }
+
+    if q is not None:
+        update_props["Quantidade"] = {"number": q}
+
+    if avg is not None:
+        update_props["Preço Médio (USD)"] = {"number": avg}
+
+    if last is not None:
+        update_props["Último Preço Capturado (USD)"] = {"number": last}
+
+    if aportes is not None:
+        update_props["Aportes Totais (USD)"] = {"number": aportes}
+
+    if saldo is not None:
+        update_props["Saldo Atual (USD)"] = {"number": saldo}
+
+    if lucro is not None:
+        update_props["Lucro (USD)"] = {"number": lucro}
+
+    if percent is not None:
+        update_props["% Lucro"] = {"number": percent}
+
+    if body.tipo_ativo is not None:
+        update_props["Tipo de Ativo"] = {"select": {"name": body.tipo_ativo}}
+
+    return update_props
+
+
+def page_to_investment_summary(page: dict) -> InvestmentSummary:
+    props = page.get("properties", {})
+    return InvestmentSummary(
+        investment_id=page.get("id"),
+        asset=_extract_title(props.get("Ativo", {})),
+        quantity=_extract_number(props.get("Quantidade", {})),
+        average_price_usd=_extract_number(props.get("Preço Médio (USD)", {})),
+        last_price_usd=_extract_number(props.get("Último Preço Capturado (USD)", {})),
+        aportes_totais_usd=_extract_number(props.get("Aportes Totais (USD)", {})),
+        saldo_atual_usd=_extract_number(props.get("Saldo Atual (USD)", {})),
+        lucro_usd=_extract_number(props.get("Lucro (USD)", {})),
+        percent_lucro=_extract_number(props.get("% Lucro", {})),
+        tipo_ativo=_extract_select_name(props.get("Tipo de Ativo", {})),
+        url=page.get("url"),
+    )
+
+
+@app.post("/notion/investments", response_model=InvestmentSummary)
+def create_investment(body: CreateInvestmentRequest):
+    database_id = _investments_db_or_500()
+
+    try:
+        props = build_investment_properties_from_create(body)
+        page = notion.pages.create(
+            parent={"database_id": database_id},
+            properties=props,
+        )
+        return page_to_investment_summary(page)
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Erro ao criar investimento no Notion: {e}",
+        )
+
+
+@app.get("/notion/investments", response_model=QueryInvestmentsResponse)
+def list_investments(
+    asset: Optional[str] = Query(
+        None, description="Filtra por nome do ativo (Ativo contém este texto)."
+    ),
+    only_profitable: Optional[bool] = Query(
+        None, description="Se true, só devolve Lucro (USD) > 0; se false, < 0; se None, todos."
+    ),
+):
+    database_id = _investments_db_or_500()
+
+    filters = []
+
+    if asset:
+        filters.append({
+            "property": "Ativo",
+            "title": {"contains": asset},
+        })
+
+    if only_profitable is True:
+        filters.append({
+            "property": "Lucro (USD)",
+            "number": {"greater_than": 0},
+        })
+    elif only_profitable is False:
+        filters.append({
+            "property": "Lucro (USD)",
+            "number": {"less_than": 0},
+        })
+
+    if filters:
+        if len(filters) == 1:
+            filter_obj = filters[0]
+        else:
+            filter_obj = {"and": filters}
+    else:
+        filter_obj = None
+
+    try:
+        if filter_obj:
+            result = notion.databases.query(
+                database_id=database_id,
+                filter=filter_obj,
+            )
+        else:
+            result = notion.databases.query(database_id=database_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao consultar investimentos: {e}",
+        )
+
+    investments = [page_to_investment_summary(page) for page in result.get("results", [])]
+    return QueryInvestmentsResponse(investments=investments)
+
+
+@app.patch("/notion/investments/{investmentId}", response_model=UpdateInvestmentResponse)
+def update_investment(
+    body: UpdateInvestmentRequest,
+    investmentId: str = Path(..., description="ID do investimento na base Investimentos Hub"),
+):
+    database_id = _investments_db_or_500()
+
+    # Primeiro, obter a página existente para ler valores atuais
+    try:
+        page = notion.pages.retrieve(investmentId)
+    except Exception as e:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Investimento não encontrado: {e}",
+        )
+
+    properties = build_investment_properties_from_update(body, page)
+
+    if not properties:
+        raise HTTPException(
+            status_code=400,
+            detail="Nenhum campo para actualizar.",
+        )
+
+    try:
+        notion.pages.update(page_id=investmentId, properties=properties)
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Erro ao actualizar investimento no Notion: {e}",
+        )
+
+    return UpdateInvestmentResponse(
+        investment_id=investmentId,
         updated_fields=list(properties.keys()),
     )
