@@ -968,9 +968,6 @@ def page_to_note_summary(page: dict) -> NoteSummary:
 
 @app.post("/notion/notes", response_model=NoteSummary)
 def create_note(body: CreateNoteRequest):
-    """
-    Cria uma nova nota na base 'Ideias & Notas Hub'.
-    """
     database_id = _notes_db_or_500()
 
     try:
@@ -999,9 +996,6 @@ def list_notes(
         description="Filtra por categoria.",
     ),
 ):
-    """
-    Lista notas da base 'Ideias & Notas Hub'.
-    """
     database_id = _notes_db_or_500()
 
     filters = []
@@ -1114,24 +1108,24 @@ def _investments_db_or_500() -> str:
 
 
 class CreateInvestmentRequest(BaseModel):
-    asset: str                      # Ativo
-    quantity: float                 # Quantidade
-    average_price_usd: float        # Preço Médio (USD)
-    last_price_usd: Optional[float] = None           # Último Preço Capturado (USD)
-    aportes_totais_usd: Optional[float] = None       # Aportes Totais (USD)
-    saldo_atual_usd: Optional[float] = None          # Saldo Atual (USD)
-    lucro_usd: Optional[float] = None                # Lucro (USD)
-    percent_lucro: Optional[float] = None            # % Lucro
-    tipo_ativo: Optional[str] = None                 # Tipo de Ativo (select)
+    ativo: str
+    quantidade: float
+    average_price_usd: float
+    aporte: float
+    saldo_atual_usd: float
+    lucro_usd: float
+    percent_lucro: float
+    last_price_usd: Optional[float] = None
+    tipo_ativo: Optional[str] = None
 
 
 class InvestmentSummary(BaseModel):
     investment_id: str
-    asset: Optional[str] = None
-    quantity: Optional[float] = None
+    ativo: Optional[str] = None
+    quantidade: Optional[float] = None
     average_price_usd: Optional[float] = None
     last_price_usd: Optional[float] = None
-    aportes_totais_usd: Optional[float] = None
+    aporte: Optional[float] = None
     saldo_atual_usd: Optional[float] = None
     lucro_usd: Optional[float] = None
     percent_lucro: Optional[float] = None
@@ -1144,11 +1138,11 @@ class QueryInvestmentsResponse(BaseModel):
 
 
 class UpdateInvestmentRequest(BaseModel):
-    asset: Optional[str] = None
-    quantity: Optional[float] = None
+    ativo: Optional[str] = None
+    quantidade: Optional[float] = None
     average_price_usd: Optional[float] = None
     last_price_usd: Optional[float] = None
-    aportes_totais_usd: Optional[float] = None
+    aporte: Optional[float] = None
     saldo_atual_usd: Optional[float] = None
     lucro_usd: Optional[float] = None
     percent_lucro: Optional[float] = None
@@ -1160,73 +1154,22 @@ class UpdateInvestmentResponse(BaseModel):
     updated_fields: List[str]
 
 
-def build_investment_properties_from_create(body: CreateInvestmentRequest):
-    """
-    Mapeia diretamente os campos do pedido para as colunas da base Investimentos Hub.
-    A Mia é responsável por calcular lucro/%lucro antes de enviar, se quiser.
-    """
+def build_investment_properties(body: CreateInvestmentRequest):
     props = {
-        "Ativo": {
-            "title": [{"text": {"content": body.asset}}],
-        },
-        "Quantidade": {"number": body.quantity},
+        "Ativo": {"title": [{"text": {"content": body.ativo}}]},
+        "Quantidade": {"number": body.quantidade},
         "Preço Médio (USD)": {"number": body.average_price_usd},
+        "Aportes Totais (USD)": {"number": body.aporte},
+        "Saldo Atual (USD)": {"number": body.saldo_atual_usd},
+        "Lucro (USD)": {"number": body.lucro_usd},
+        "% Lucro": {"number": body.percent_lucro},
+        "Tipo de Ativo": {"select": {"name": body.tipo_ativo or "Cripto"}},
     }
 
-    if body.last_price_usd is not None:
-        props["Último Preço Capturado (USD)"] = {"number": body.last_price_usd}
-
-    if body.aportes_totais_usd is not None:
-        props["Aportes Totais (USD)"] = {"number": body.aportes_totais_usd}
-
-    if body.saldo_atual_usd is not None:
-        props["Saldo Atual (USD)"] = {"number": body.saldo_atual_usd}
-
-    if body.lucro_usd is not None:
-        props["Lucro (USD)"] = {"number": body.lucro_usd}
-
-    if body.percent_lucro is not None:
-        props["% Lucro"] = {"number": body.percent_lucro}
-
-    if body.tipo_ativo is not None:
-        props["Tipo de Ativo"] = {"select": {"name": body.tipo_ativo}}
-
-    return props
-
-
-def build_investment_properties_from_update(body: UpdateInvestmentRequest):
-    """
-    Só escreve os campos enviados; não recalcula nada.
-    A Mia faz as contas e envia os valores certos.
-    """
-    props = {}
-
-    if body.asset is not None:
-        props["Ativo"] = {"title": [{"text": {"content": body.asset}}]}
-
-    if body.quantity is not None:
-        props["Quantidade"] = {"number": body.quantity}
-
-    if body.average_price_usd is not None:
-        props["Preço Médio (USD)"] = {"number": body.average_price_usd}
-
-    if body.last_price_usd is not None:
-        props["Último Preço Capturado (USD)"] = {"number": body.last_price_usd}
-
-    if body.aportes_totais_usd is not None:
-        props["Aportes Totais (USD)"] = {"number": body.aportes_totais_usd}
-
-    if body.saldo_atual_usd is not None:
-        props["Saldo Atual (USD)"] = {"number": body.saldo_atual_usd}
-
-    if body.lucro_usd is not None:
-        props["Lucro (USD)"] = {"number": body.lucro_usd}
-
-    if body.percent_lucro is not None:
-        props["% Lucro"] = {"number": body.percent_lucro}
-
-    if body.tipo_ativo is not None:
-        props["Tipo de Ativo"] = {"select": {"name": body.tipo_ativo}}
+    # Último preço capturado pode vir vazio (0) e será actualizado depois
+    props["Último Preço Capturado (USD)"] = {
+        "number": body.last_price_usd if body.last_price_usd is not None else 0
+    }
 
     return props
 
@@ -1235,11 +1178,11 @@ def page_to_investment_summary(page: dict) -> InvestmentSummary:
     props = page.get("properties", {})
     return InvestmentSummary(
         investment_id=page.get("id"),
-        asset=_extract_title(props.get("Ativo", {})),
-        quantity=_extract_number(props.get("Quantidade", {})),
+        ativo=_extract_title(props.get("Ativo", {})),
+        quantidade=_extract_number(props.get("Quantidade", {})),
         average_price_usd=_extract_number(props.get("Preço Médio (USD)", {})),
         last_price_usd=_extract_number(props.get("Último Preço Capturado (USD)", {})),
-        aportes_totais_usd=_extract_number(props.get("Aportes Totais (USD)", {})),
+        aporte=_extract_number(props.get("Aportes Totais (USD)", {})),
         saldo_atual_usd=_extract_number(props.get("Saldo Atual (USD)", {})),
         lucro_usd=_extract_number(props.get("Lucro (USD)", {})),
         percent_lucro=_extract_number(props.get("% Lucro", {})),
@@ -1253,56 +1196,35 @@ def create_investment(body: CreateInvestmentRequest):
     database_id = _investments_db_or_500()
 
     try:
-        props = build_investment_properties_from_create(body)
+        props = build_investment_properties(body)
         page = notion.pages.create(
             parent={"database_id": database_id},
             properties=props,
         )
-        return page_to_investment_summary(page)
     except Exception as e:
         raise HTTPException(
             status_code=400,
             detail=f"Erro ao criar investimento no Notion: {e}",
         )
 
+    return page_to_investment_summary(page)
+
 
 @app.get("/notion/investments", response_model=QueryInvestmentsResponse)
 def list_investments(
-    asset: Optional[str] = Query(
-        None, description="Filtra por nome do ativo (campo 'Ativo' contém este texto)."
-    ),
-    only_profitable: Optional[bool] = Query(
-        None, description="true → Lucro (USD) > 0; false → Lucro (USD) < 0; None → todos."
-    ),
+    tipo_ativo: Optional[str] = Query(
+        None,
+        description="Filtra por Tipo de Ativo (por exemplo: Cripto, Ação, ETF...).",
+    )
 ):
     database_id = _investments_db_or_500()
 
-    filters = []
-
-    if asset:
-        filters.append({
-            "property": "Ativo",
-            "title": {"contains": asset},
-        })
-
-    if only_profitable is True:
-        filters.append({
-            "property": "Lucro (USD)",
-            "number": {"greater_than": 0},
-        })
-    elif only_profitable is False:
-        filters.append({
-            "property": "Lucro (USD)",
-            "number": {"less_than": 0},
-        })
-
-    if filters:
-        if len(filters) == 1:
-            filter_obj = filters[0]
-        else:
-            filter_obj = {"and": filters}
-    else:
-        filter_obj = None
+    filter_obj = None
+    if tipo_ativo:
+        filter_obj = {
+            "property": "Tipo de Ativo",
+            "select": {"equals": tipo_ativo},
+        }
 
     try:
         if filter_obj:
@@ -1311,16 +1233,16 @@ def list_investments(
                 filter=filter_obj,
             )
         else:
-            result = notion.databases.query(
-                database_id=database_id,
-            )
+            result = notion.databases.query(database_id=database_id)
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail=f"Erro ao consultar investimentos: {e}",
         )
 
-    investments = [page_to_investment_summary(page) for page in result.get("results", [])]
+    investments = [
+        page_to_investment_summary(page) for page in result.get("results", [])
+    ]
     return QueryInvestmentsResponse(investments=investments)
 
 
@@ -1331,7 +1253,34 @@ def update_investment(
 ):
     _investments_db_or_500()
 
-    properties = build_investment_properties_from_update(body)
+    properties = {}
+
+    if body.ativo is not None:
+        properties["Ativo"] = {"title": [{"text": {"content": body.ativo}}]}
+
+    if body.quantidade is not None:
+        properties["Quantidade"] = {"number": body.quantidade}
+
+    if body.average_price_usd is not None:
+        properties["Preço Médio (USD)"] = {"number": body.average_price_usd}
+
+    if body.last_price_usd is not None:
+        properties["Último Preço Capturado (USD)"] = {"number": body.last_price_usd}
+
+    if body.aporte is not None:
+        properties["Aportes Totais (USD)"] = {"number": body.aporte}
+
+    if body.saldo_atual_usd is not None:
+        properties["Saldo Atual (USD)"] = {"number": body.saldo_atual_usd}
+
+    if body.lucro_usd is not None:
+        properties["Lucro (USD)"] = {"number": body.lucro_usd}
+
+    if body.percent_lucro is not None:
+        properties["% Lucro"] = {"number": body.percent_lucro}
+
+    if body.tipo_ativo is not None:
+        properties["Tipo de Ativo"] = {"select": {"name": body.tipo_ativo}}
 
     if not properties:
         raise HTTPException(
@@ -1351,3 +1300,42 @@ def update_investment(
         investment_id=investmentId,
         updated_fields=list(properties.keys()),
     )
+
+
+# ============================================================
+#  INVESTIMENTOS HUB — INSERÇÃO EM MASSA (BULK)
+# ============================================================
+
+class BulkInvestment(CreateInvestmentRequest):
+    pass
+
+
+class BulkInvestmentRequest(BaseModel):
+    investments: List[BulkInvestment]
+
+
+@app.post("/notion/investments/bulk")
+def add_bulk_investments(body: BulkInvestmentRequest):
+    database_id = _investments_db_or_500()
+    created_items = []
+
+    for inv in body.investments:
+        props = build_investment_properties(inv)
+
+        try:
+            page = notion.pages.create(
+                parent={"database_id": database_id},
+                properties=props
+            )
+            created_items.append({"id": page["id"], "ativo": inv.ativo})
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Erro ao adicionar {inv.ativo}: {e}"
+            )
+
+    return {
+        "status": "ok",
+        "total_added": len(created_items),
+        "items": created_items,
+    }
