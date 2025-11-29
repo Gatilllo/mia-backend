@@ -1,5 +1,5 @@
 import os
-from typing import Optional, List
+from typing import Optional, List, Union
 
 from fastapi import FastAPI, HTTPException, Path, Query
 from pydantic import BaseModel
@@ -884,9 +884,10 @@ def _notes_db_or_500() -> str:
 
 class CreateNoteRequest(BaseModel):
     title: str
-    category: Optional[str] = None
+    # pode ser string única ou lista de categorias
+    category: Optional[Union[str, List[str]]] = None
     emotional_energy: Optional[str] = None   # Alta, Média, Baixa...
-    impact: Optional[str] = None             # por ex.: Alto, Médio, Baixo
+    impact: Optional[str] = None             # Alto, Médio, Baixo...
     favorite: Optional[bool] = None
     date: Optional[str] = None               # YYYY-MM-DD
     details: Optional[str] = None            # campo "Notas detalhadas"
@@ -895,7 +896,7 @@ class CreateNoteRequest(BaseModel):
 class NoteSummary(BaseModel):
     note_id: str
     title: Optional[str] = None
-    category: Optional[str] = None
+    category: List[str] = []
     emotional_energy: Optional[str] = None
     impact: Optional[str] = None
     favorite: Optional[bool] = None
@@ -909,7 +910,7 @@ class QueryNotesResponse(BaseModel):
 
 class UpdateNoteRequest(BaseModel):
     title: Optional[str] = None
-    category: Optional[str] = None
+    category: Optional[Union[str, List[str]]] = None
     emotional_energy: Optional[str] = None
     impact: Optional[str] = None
     favorite: Optional[bool] = None
@@ -922,15 +923,37 @@ class UpdateNoteResponse(BaseModel):
     updated_fields: List[str]
 
 
+def _build_category_multi_select(category: Optional[Union[str, List[str]]]):
+    if not category:
+        return None
+
+    if isinstance(category, list):
+        return [{"name": c} for c in category]
+    else:
+        return [{"name": category}]
+
+
 def build_note_properties(body: CreateNoteRequest):
+    """
+    Usa exactamente os nomes das colunas da tabela 'Ideias & Notas Hub':
+
+      - "Título / Nota"        (title)
+      - "Categoria"           (multi_select)
+      - "Energia emocional"   (select)
+      - "Impacto"             (select)
+      - "Favorito"            (checkbox)
+      - "Data"                (date)
+      - "Notas detalhadas"    (rich_text)
+    """
     props = {
         "Título / Nota": {
             "title": [{"text": {"content": body.title}}],
         }
     }
 
-    if body.category:
-        props["Categoria"] = {"select": {"name": body.category}}
+    ms = _build_category_multi_select(body.category)
+    if ms:
+        props["Categoria"] = {"multi_select": ms}
 
     if body.emotional_energy:
         props["Energia emocional"] = {"select": {"name": body.emotional_energy}}
@@ -957,7 +980,7 @@ def page_to_note_summary(page: dict) -> NoteSummary:
     return NoteSummary(
         note_id=page.get("id"),
         title=_extract_title(props.get("Título / Nota", {})),
-        category=_extract_select_name(props.get("Categoria", {})),
+        category=_extract_multi_select_names(props.get("Categoria", {})),
         emotional_energy=_extract_select_name(props.get("Energia emocional", {})),
         impact=_extract_select_name(props.get("Impacto", {})),
         favorite=_extract_checkbox(props.get("Favorito", {})),
@@ -993,7 +1016,7 @@ def list_notes(
     ),
     category: Optional[str] = Query(
         None,
-        description="Filtra por categoria.",
+        description="Filtra por categoria (nome exacto).",
     ),
 ):
     database_id = _notes_db_or_500()
@@ -1009,7 +1032,7 @@ def list_notes(
     if category:
         filters.append({
             "property": "Categoria",
-            "select": {"equals": category},
+            "multi_select": {"contains": category},
         })
 
     filter_obj = None
@@ -1052,7 +1075,8 @@ def update_note(
         }
 
     if body.category is not None:
-        properties["Categoria"] = {"select": {"name": body.category}}
+        ms = _build_category_multi_select(body.category)
+        properties["Categoria"] = {"multi_select": ms or []}
 
     if body.emotional_energy is not None:
         properties["Energia emocional"] = {
@@ -1108,68 +1132,56 @@ def _investments_db_or_500() -> str:
 
 
 class CreateInvestmentRequest(BaseModel):
-    ativo: str
-    quantidade: float
-    average_price_usd: float
-    aporte: float
-    saldo_atual_usd: float
-    lucro_usd: float
-    percent_lucro: float
-    last_price_usd: Optional[float] = None
-    tipo_ativo: Optional[str] = None
+    asset_name: str                 # Pepe, NEAR Protocol, etc.
+    quantity: float                 # Total de moedas
+    average_price_usd: float        # Preço médio (USD)
+    aporte_usd: float               # Aportes Totais (USD)
+    current_balance_usd: float      # Saldo Atual (USD)
+    profit_usd: float               # Lucro (USD)
+    percent_profit: float           # % Lucro (positivo ou negativo)
+    asset_type: Optional[str] = None         # Cripto, Ação, ETF...
+    last_price_usd: Optional[float] = None   # Último preço capturado (USD)
 
 
 class InvestmentSummary(BaseModel):
     investment_id: str
-    ativo: Optional[str] = None
-    quantidade: Optional[float] = None
+    asset_name: Optional[str] = None
+    quantity: Optional[float] = None
     average_price_usd: Optional[float] = None
-    last_price_usd: Optional[float] = None
-    aporte: Optional[float] = None
-    saldo_atual_usd: Optional[float] = None
-    lucro_usd: Optional[float] = None
-    percent_lucro: Optional[float] = None
-    tipo_ativo: Optional[str] = None
+    aporte_usd: Optional[float] = None
+    current_balance_usd: Optional[float] = None
+    profit_usd: Optional[float] = None
+    percent_profit: Optional[float] = None
+    asset_type: Optional[str] = None
     url: Optional[str] = None
 
 
-class QueryInvestmentsResponse(BaseModel):
+class BulkCreateInvestmentsRequest(BaseModel):
+    investments: List[CreateInvestmentRequest]
+
+
+class BulkCreateInvestmentsResponse(BaseModel):
     investments: List[InvestmentSummary]
-
-
-class UpdateInvestmentRequest(BaseModel):
-    ativo: Optional[str] = None
-    quantidade: Optional[float] = None
-    average_price_usd: Optional[float] = None
-    last_price_usd: Optional[float] = None
-    aporte: Optional[float] = None
-    saldo_atual_usd: Optional[float] = None
-    lucro_usd: Optional[float] = None
-    percent_lucro: Optional[float] = None
-    tipo_ativo: Optional[str] = None
-
-
-class UpdateInvestmentResponse(BaseModel):
-    investment_id: str
-    updated_fields: List[str]
 
 
 def build_investment_properties(body: CreateInvestmentRequest):
     props = {
-        "Ativo": {"title": [{"text": {"content": body.ativo}}]},
-        "Quantidade": {"number": body.quantidade},
+        "Ativo": {
+            "title": [{"text": {"content": body.asset_name}}],
+        },
+        "Quantidade": {"number": body.quantity},
         "Preço Médio (USD)": {"number": body.average_price_usd},
-        "Aportes Totais (USD)": {"number": body.aporte},
-        "Saldo Atual (USD)": {"number": body.saldo_atual_usd},
-        "Lucro (USD)": {"number": body.lucro_usd},
-        "% Lucro": {"number": body.percent_lucro},
-        "Tipo de Ativo": {"select": {"name": body.tipo_ativo or "Cripto"}},
+        "Aportes Totais (USD)": {"number": body.aporte_usd},
+        "Saldo Atual (USD)": {"number": body.current_balance_usd},
+        "Lucro (USD)": {"number": body.profit_usd},
+        "% Lucro": {"number": body.percent_profit},
     }
 
-    # Último preço capturado pode vir vazio (0) e será actualizado depois
-    props["Último Preço Capturado (USD)"] = {
-        "number": body.last_price_usd if body.last_price_usd is not None else 0
-    }
+    if body.last_price_usd is not None:
+        props["Último Preço Capturado (USD)"] = {"number": body.last_price_usd}
+
+    if body.asset_type:
+        props["Tipo de Ativo"] = {"select": {"name": body.asset_type}}
 
     return props
 
@@ -1178,52 +1190,64 @@ def page_to_investment_summary(page: dict) -> InvestmentSummary:
     props = page.get("properties", {})
     return InvestmentSummary(
         investment_id=page.get("id"),
-        ativo=_extract_title(props.get("Ativo", {})),
-        quantidade=_extract_number(props.get("Quantidade", {})),
+        asset_name=_extract_title(props.get("Ativo", {})),
+        quantity=_extract_number(props.get("Quantidade", {})),
         average_price_usd=_extract_number(props.get("Preço Médio (USD)", {})),
-        last_price_usd=_extract_number(props.get("Último Preço Capturado (USD)", {})),
-        aporte=_extract_number(props.get("Aportes Totais (USD)", {})),
-        saldo_atual_usd=_extract_number(props.get("Saldo Atual (USD)", {})),
-        lucro_usd=_extract_number(props.get("Lucro (USD)", {})),
-        percent_lucro=_extract_number(props.get("% Lucro", {})),
-        tipo_ativo=_extract_select_name(props.get("Tipo de Ativo", {})),
+        aporte_usd=_extract_number(props.get("Aportes Totais (USD)", {})),
+        current_balance_usd=_extract_number(props.get("Saldo Atual (USD)", {})),
+        profit_usd=_extract_number(props.get("Lucro (USD)", {})),
+        percent_profit=_extract_number(props.get("% Lucro", {})),
+        asset_type=_extract_select_name(props.get("Tipo de Ativo", {})),
         url=page.get("url"),
     )
 
 
-@app.post("/notion/investments", response_model=InvestmentSummary)
-def create_investment(body: CreateInvestmentRequest):
+@app.post("/notion/investments/bulk", response_model=BulkCreateInvestmentsResponse)
+def bulk_create_investments(body: BulkCreateInvestmentsRequest):
+    """
+    Cria vários investimentos de uma só vez na base 'Investimentos Hub'.
+    Usado pela Mia quando lê a tabela da tua carteira (screenshot).
+    """
     database_id = _investments_db_or_500()
 
+    created: List[InvestmentSummary] = []
+
     try:
-        props = build_investment_properties(body)
-        page = notion.pages.create(
-            parent={"database_id": database_id},
-            properties=props,
-        )
+        for item in body.investments:
+            props = build_investment_properties(item)
+            page = notion.pages.create(
+                parent={"database_id": database_id},
+                properties=props,
+            )
+            created.append(page_to_investment_summary(page))
     except Exception as e:
         raise HTTPException(
             status_code=400,
-            detail=f"Erro ao criar investimento no Notion: {e}",
+            detail=f"Erro ao criar investimentos no Notion: {e}",
         )
 
-    return page_to_investment_summary(page)
+    return BulkCreateInvestmentsResponse(investments=created)
 
 
-@app.get("/notion/investments", response_model=QueryInvestmentsResponse)
+@app.get("/notion/investments", response_model=List[InvestmentSummary])
 def list_investments(
-    tipo_ativo: Optional[str] = Query(
+    lucro_positivo: Optional[bool] = Query(
         None,
-        description="Filtra por Tipo de Ativo (por exemplo: Cripto, Ação, ETF...).",
+        description="Se True, devolve apenas % Lucro > 0. Se False, apenas % Lucro <= 0. Se None, todos.",
     )
 ):
     database_id = _investments_db_or_500()
 
     filter_obj = None
-    if tipo_ativo:
+    if lucro_positivo is True:
         filter_obj = {
-            "property": "Tipo de Ativo",
-            "select": {"equals": tipo_ativo},
+            "property": "% Lucro",
+            "number": {"greater_than": 0},
+        }
+    elif lucro_positivo is False:
+        filter_obj = {
+            "property": "% Lucro",
+            "number": {"less_than_or_equal_to": 0},
         }
 
     try:
@@ -1240,102 +1264,4 @@ def list_investments(
             detail=f"Erro ao consultar investimentos: {e}",
         )
 
-    investments = [
-        page_to_investment_summary(page) for page in result.get("results", [])
-    ]
-    return QueryInvestmentsResponse(investments=investments)
-
-
-@app.patch("/notion/investments/{investmentId}", response_model=UpdateInvestmentResponse)
-def update_investment(
-    body: UpdateInvestmentRequest,
-    investmentId: str = Path(..., description="ID do investimento na base Investimentos Hub"),
-):
-    _investments_db_or_500()
-
-    properties = {}
-
-    if body.ativo is not None:
-        properties["Ativo"] = {"title": [{"text": {"content": body.ativo}}]}
-
-    if body.quantidade is not None:
-        properties["Quantidade"] = {"number": body.quantidade}
-
-    if body.average_price_usd is not None:
-        properties["Preço Médio (USD)"] = {"number": body.average_price_usd}
-
-    if body.last_price_usd is not None:
-        properties["Último Preço Capturado (USD)"] = {"number": body.last_price_usd}
-
-    if body.aporte is not None:
-        properties["Aportes Totais (USD)"] = {"number": body.aporte}
-
-    if body.saldo_atual_usd is not None:
-        properties["Saldo Atual (USD)"] = {"number": body.saldo_atual_usd}
-
-    if body.lucro_usd is not None:
-        properties["Lucro (USD)"] = {"number": body.lucro_usd}
-
-    if body.percent_lucro is not None:
-        properties["% Lucro"] = {"number": body.percent_lucro}
-
-    if body.tipo_ativo is not None:
-        properties["Tipo de Ativo"] = {"select": {"name": body.tipo_ativo}}
-
-    if not properties:
-        raise HTTPException(
-            status_code=400,
-            detail="Nenhum campo para actualizar.",
-        )
-
-    try:
-        notion.pages.update(page_id=investmentId, properties=properties)
-    except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Erro ao actualizar investimento no Notion: {e}",
-        )
-
-    return UpdateInvestmentResponse(
-        investment_id=investmentId,
-        updated_fields=list(properties.keys()),
-    )
-
-
-# ============================================================
-#  INVESTIMENTOS HUB — INSERÇÃO EM MASSA (BULK)
-# ============================================================
-
-class BulkInvestment(CreateInvestmentRequest):
-    pass
-
-
-class BulkInvestmentRequest(BaseModel):
-    investments: List[BulkInvestment]
-
-
-@app.post("/notion/investments/bulk")
-def add_bulk_investments(body: BulkInvestmentRequest):
-    database_id = _investments_db_or_500()
-    created_items = []
-
-    for inv in body.investments:
-        props = build_investment_properties(inv)
-
-        try:
-            page = notion.pages.create(
-                parent={"database_id": database_id},
-                properties=props
-            )
-            created_items.append({"id": page["id"], "ativo": inv.ativo})
-        except Exception as e:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Erro ao adicionar {inv.ativo}: {e}"
-            )
-
-    return {
-        "status": "ok",
-        "total_added": len(created_items),
-        "items": created_items,
-    }
+    return [page_to_investment_summary(p) for p in result.get("results", [])]
