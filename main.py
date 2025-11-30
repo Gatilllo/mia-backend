@@ -1,5 +1,5 @@
 import os
-from typing import Optional, List, Union
+from typing import Optional, List
 
 from fastapi import FastAPI, HTTPException, Path, Query
 from pydantic import BaseModel
@@ -77,6 +77,17 @@ def _extract_number(prop: dict) -> Optional[float]:
 
 def _extract_checkbox(prop: dict) -> Optional[bool]:
     return prop.get("checkbox")
+
+
+def normalize_multi_select_from_string(value: Optional[str]) -> List[dict]:
+    """
+    Converte uma string (ex.: "Documentário" ou "Doc, Netflix")
+    no formato esperado pelo Notion para multi_select.
+    """
+    if not value:
+        return []
+    parts = [p.strip() for p in value.split(",") if p.strip()]
+    return [{"name": part} for part in parts]
 
 
 # ============================================================
@@ -304,7 +315,7 @@ def update_notion_task(
 
 
 # ============================================================
-#  FILMES HUB
+#  FILMES / CONTEÚDOS HUB  (Categoria = multi-select)
 # ============================================================
 
 def _movies_db_or_500() -> str:
@@ -319,16 +330,16 @@ def _movies_db_or_500() -> str:
 
 class CreateMovieRequest(BaseModel):
     title: str
+    category: Optional[str] = None       # será convertido para multi-select
     watched: Optional[bool] = False
-    category: Optional[str] = None
     notes: Optional[str] = None
 
 
 class MovieSummary(BaseModel):
     movie_id: str
     title: Optional[str] = None
+    category: List[str] = []
     watched: Optional[bool] = None
-    category: Optional[str] = None
     url: Optional[str] = None
 
 
@@ -338,8 +349,8 @@ class QueryMoviesResponse(BaseModel):
 
 class UpdateMovieRequest(BaseModel):
     title: Optional[str] = None
+    category: Optional[str] = None       # string, pode conter várias categorias separadas por vírgula
     watched: Optional[bool] = None
-    category: Optional[str] = None
     notes: Optional[str] = None
 
 
@@ -352,14 +363,16 @@ def build_movie_properties(body: CreateMovieRequest):
     props = {
         "Filme": {
             "title": [{"text": {"content": body.title}}],
-        }
+        },
+        "Já Vi": {
+            "checkbox": body.watched or False
+        },
     }
 
     if body.category:
-        props["Categoria"] = {"select": {"name": body.category}}
-
-    if body.watched is not None:
-        props["Já Vi"] = {"checkbox": body.watched}
+        props["Categoria"] = {
+            "multi_select": normalize_multi_select_from_string(body.category)
+        }
 
     if body.notes:
         props["Notas"] = {"rich_text": [{"text": {"content": body.notes}}]}
@@ -372,8 +385,8 @@ def page_to_movie_summary(page: dict) -> MovieSummary:
     return MovieSummary(
         movie_id=page.get("id"),
         title=_extract_title(props.get("Filme", {})),
+        category=_extract_multi_select_names(props.get("Categoria", {})),
         watched=_extract_checkbox(props.get("Já Vi", {})),
-        category=_extract_select_name(props.get("Categoria", {})),
         url=page.get("url"),
     )
 
@@ -391,7 +404,7 @@ def create_movie(body: CreateMovieRequest):
     except Exception as e:
         raise HTTPException(
             status_code=400,
-            detail=f"Erro ao criar filme no Notion: {e}",
+            detail=f"Erro ao criar conteúdo no Notion: {e}",
         )
 
     return page_to_movie_summary(page)
@@ -424,7 +437,7 @@ def list_movies(
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Erro ao consultar filmes: {e}",
+            detail=f"Erro ao consultar conteúdos: {e}",
         )
 
     movies = [page_to_movie_summary(page) for page in result.get("results", [])]
@@ -434,7 +447,7 @@ def list_movies(
 @app.patch("/notion/movies/{movieId}", response_model=UpdateMovieResponse)
 def update_movie(
     body: UpdateMovieRequest,
-    movieId: str = Path(..., description="ID do filme na base Filmes Hub"),
+    movieId: str = Path(..., description="ID do conteúdo na base Filmes Hub"),
 ):
     _movies_db_or_500()
 
@@ -444,7 +457,9 @@ def update_movie(
         properties["Filme"] = {"title": [{"text": {"content": body.title}}]}
 
     if body.category is not None:
-        properties["Categoria"] = {"select": {"name": body.category}}
+        properties["Categoria"] = {
+            "multi_select": normalize_multi_select_from_string(body.category)
+        }
 
     if body.watched is not None:
         properties["Já Vi"] = {"checkbox": body.watched}
@@ -465,7 +480,7 @@ def update_movie(
     except Exception as e:
         raise HTTPException(
             status_code=400,
-            detail=f"Erro ao actualizar filme no Notion: {e}",
+            detail=f"Erro ao actualizar conteúdo no Notion: {e}",
         )
 
     return UpdateMovieResponse(
@@ -869,7 +884,7 @@ def update_quote(
 
 
 # ============================================================
-#  IDEIAS & NOTAS HUB
+#  IDEIAS & NOTAS HUB  (Categoria = multi-select)
 # ============================================================
 
 def _notes_db_or_500() -> str:
@@ -884,13 +899,12 @@ def _notes_db_or_500() -> str:
 
 class CreateNoteRequest(BaseModel):
     title: str
-    # pode ser string única ou lista de categorias
-    category: Optional[Union[str, List[str]]] = None
-    emotional_energy: Optional[str] = None   # Alta, Média, Baixa...
-    impact: Optional[str] = None             # Alto, Médio, Baixo...
+    category: Optional[str] = None                 # multi-select (string com vírgulas)
+    emotional_energy: Optional[str] = None         # Alta, Média, Baixa...
+    impact: Optional[str] = None                   # Alto, Médio, Baixo...
     favorite: Optional[bool] = None
-    date: Optional[str] = None               # YYYY-MM-DD
-    details: Optional[str] = None            # campo "Notas detalhadas"
+    date: Optional[str] = None                     # YYYY-MM-DD
+    details: Optional[str] = None                  # campo "Notas detalhadas"
 
 
 class NoteSummary(BaseModel):
@@ -910,7 +924,7 @@ class QueryNotesResponse(BaseModel):
 
 class UpdateNoteRequest(BaseModel):
     title: Optional[str] = None
-    category: Optional[Union[str, List[str]]] = None
+    category: Optional[str] = None
     emotional_energy: Optional[str] = None
     impact: Optional[str] = None
     favorite: Optional[bool] = None
@@ -923,27 +937,16 @@ class UpdateNoteResponse(BaseModel):
     updated_fields: List[str]
 
 
-def _build_category_multi_select(category: Optional[Union[str, List[str]]]):
-    if not category:
-        return None
-
-    if isinstance(category, list):
-        return [{"name": c} for c in category]
-    else:
-        return [{"name": category}]
-
-
 def build_note_properties(body: CreateNoteRequest):
     """
-    Usa exactamente os nomes das colunas da tabela 'Ideias & Notas Hub':
-
-      - "Título / Nota"        (title)
-      - "Categoria"           (multi_select)
-      - "Energia emocional"   (select)
-      - "Impacto"             (select)
-      - "Favorito"            (checkbox)
-      - "Data"                (date)
-      - "Notas detalhadas"    (rich_text)
+    Nomes de colunas na base 'Ideias & Notas Hub':
+      - "Título / Nota"      (title)
+      - "Categoria"          (multi-select)
+      - "Energia emocional"  (select)
+      - "Impacto"            (select)
+      - "Favorito"           (checkbox)
+      - "Data"               (date)
+      - "Notas detalhadas"   (rich_text)
     """
     props = {
         "Título / Nota": {
@@ -951,9 +954,10 @@ def build_note_properties(body: CreateNoteRequest):
         }
     }
 
-    ms = _build_category_multi_select(body.category)
-    if ms:
-        props["Categoria"] = {"multi_select": ms}
+    if body.category:
+        props["Categoria"] = {
+            "multi_select": normalize_multi_select_from_string(body.category)
+        }
 
     if body.emotional_energy:
         props["Energia emocional"] = {"select": {"name": body.emotional_energy}}
@@ -991,6 +995,9 @@ def page_to_note_summary(page: dict) -> NoteSummary:
 
 @app.post("/notion/notes", response_model=NoteSummary)
 def create_note(body: CreateNoteRequest):
+    """
+    Cria uma nova nota na base 'Ideias & Notas Hub'.
+    """
     database_id = _notes_db_or_500()
 
     try:
@@ -1019,6 +1026,9 @@ def list_notes(
         description="Filtra por categoria (nome exacto).",
     ),
 ):
+    """
+    Lista notas da base 'Ideias & Notas Hub'.
+    """
     database_id = _notes_db_or_500()
 
     filters = []
@@ -1075,8 +1085,9 @@ def update_note(
         }
 
     if body.category is not None:
-        ms = _build_category_multi_select(body.category)
-        properties["Categoria"] = {"multi_select": ms or []}
+        properties["Categoria"] = {
+            "multi_select": normalize_multi_select_from_string(body.category)
+        }
 
     if body.emotional_energy is not None:
         properties["Energia emocional"] = {
@@ -1132,27 +1143,28 @@ def _investments_db_or_500() -> str:
 
 
 class CreateInvestmentRequest(BaseModel):
-    asset_name: str                 # Pepe, NEAR Protocol, etc.
-    quantity: float                 # Total de moedas
-    average_price_usd: float        # Preço médio (USD)
-    aporte_usd: float               # Aportes Totais (USD)
-    current_balance_usd: float      # Saldo Atual (USD)
-    profit_usd: float               # Lucro (USD)
-    percent_profit: float           # % Lucro (positivo ou negativo)
-    asset_type: Optional[str] = None         # Cripto, Ação, ETF...
-    last_price_usd: Optional[float] = None   # Último preço capturado (USD)
+    asset: str
+    quantity: float
+    average_price_usd: float
+    aportes_usd: float
+    current_balance_usd: float
+    profit_usd: float
+    percent_profit: float
+    asset_type: Optional[str] = None
+    last_price_usd: Optional[float] = None
 
 
 class InvestmentSummary(BaseModel):
     investment_id: str
-    asset_name: Optional[str] = None
-    quantity: Optional[float] = None
-    average_price_usd: Optional[float] = None
-    aporte_usd: Optional[float] = None
-    current_balance_usd: Optional[float] = None
-    profit_usd: Optional[float] = None
-    percent_profit: Optional[float] = None
+    asset: str
+    quantity: float
+    average_price_usd: float
+    aportes_usd: float
+    current_balance_usd: float
+    profit_usd: float
+    percent_profit: float
     asset_type: Optional[str] = None
+    last_price_usd: Optional[float] = None
     url: Optional[str] = None
 
 
@@ -1167,11 +1179,11 @@ class BulkCreateInvestmentsResponse(BaseModel):
 def build_investment_properties(body: CreateInvestmentRequest):
     props = {
         "Ativo": {
-            "title": [{"text": {"content": body.asset_name}}],
+            "title": [{"text": {"content": body.asset}}],
         },
         "Quantidade": {"number": body.quantity},
         "Preço Médio (USD)": {"number": body.average_price_usd},
-        "Aportes Totais (USD)": {"number": body.aporte_usd},
+        "Aportes Totais (USD)": {"number": body.aportes_usd},
         "Saldo Atual (USD)": {"number": body.current_balance_usd},
         "Lucro (USD)": {"number": body.profit_usd},
         "% Lucro": {"number": body.percent_profit},
@@ -1190,31 +1202,47 @@ def page_to_investment_summary(page: dict) -> InvestmentSummary:
     props = page.get("properties", {})
     return InvestmentSummary(
         investment_id=page.get("id"),
-        asset_name=_extract_title(props.get("Ativo", {})),
-        quantity=_extract_number(props.get("Quantidade", {})),
-        average_price_usd=_extract_number(props.get("Preço Médio (USD)", {})),
-        aporte_usd=_extract_number(props.get("Aportes Totais (USD)", {})),
-        current_balance_usd=_extract_number(props.get("Saldo Atual (USD)", {})),
-        profit_usd=_extract_number(props.get("Lucro (USD)", {})),
-        percent_profit=_extract_number(props.get("% Lucro", {})),
+        asset=_extract_title(props.get("Ativo", {})) or "",
+        quantity=_extract_number(props.get("Quantidade", {})) or 0.0,
+        average_price_usd=_extract_number(props.get("Preço Médio (USD)", {})) or 0.0,
+        aportes_usd=_extract_number(props.get("Aportes Totais (USD)", {})) or 0.0,
+        current_balance_usd=_extract_number(props.get("Saldo Atual (USD)", {})) or 0.0,
+        profit_usd=_extract_number(props.get("Lucro (USD)", {})) or 0.0,
+        percent_profit=_extract_number(props.get("% Lucro", {})) or 0.0,
+        last_price_usd=_extract_number(props.get("Último Preço Capturado (USD)", {})),
         asset_type=_extract_select_name(props.get("Tipo de Ativo", {})),
         url=page.get("url"),
     )
 
 
+@app.post("/notion/investments", response_model=InvestmentSummary)
+def create_investment(body: CreateInvestmentRequest):
+    database_id = _investments_db_or_500()
+
+    try:
+        props = build_investment_properties(body)
+        page = notion.pages.create(
+            parent={"database_id": database_id},
+            properties=props,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Erro ao criar investimento no Notion: {e}",
+        )
+
+    return page_to_investment_summary(page)
+
+
 @app.post("/notion/investments/bulk", response_model=BulkCreateInvestmentsResponse)
 def bulk_create_investments(body: BulkCreateInvestmentsRequest):
-    """
-    Cria vários investimentos de uma só vez na base 'Investimentos Hub'.
-    Usado pela Mia quando lê a tabela da tua carteira (screenshot).
-    """
     database_id = _investments_db_or_500()
 
     created: List[InvestmentSummary] = []
 
     try:
-        for item in body.investments:
-            props = build_investment_properties(item)
+        for inv in body.investments:
+            props = build_investment_properties(inv)
             page = notion.pages.create(
                 parent={"database_id": database_id},
                 properties=props,
@@ -1223,30 +1251,34 @@ def bulk_create_investments(body: BulkCreateInvestmentsRequest):
     except Exception as e:
         raise HTTPException(
             status_code=400,
-            detail=f"Erro ao criar investimentos no Notion: {e}",
+            detail=f"Erro ao criar investimentos em lote: {e}",
         )
 
     return BulkCreateInvestmentsResponse(investments=created)
 
 
-@app.get("/notion/investments", response_model=List[InvestmentSummary])
+class QueryInvestmentsResponse(BaseModel):
+    investments: List[InvestmentSummary]
+
+
+@app.get("/notion/investments", response_model=QueryInvestmentsResponse)
 def list_investments(
-    lucro_positivo: Optional[bool] = Query(
+    only_profitable: Optional[bool] = Query(
         None,
-        description="Se True, devolve apenas % Lucro > 0. Se False, apenas % Lucro <= 0. Se None, todos.",
+        description="true = só com lucro > 0; false = só com lucro <= 0; None = todos.",
     )
 ):
     database_id = _investments_db_or_500()
 
     filter_obj = None
-    if lucro_positivo is True:
+    if only_profitable is True:
         filter_obj = {
-            "property": "% Lucro",
+            "property": "Lucro (USD)",
             "number": {"greater_than": 0},
         }
-    elif lucro_positivo is False:
+    elif only_profitable is False:
         filter_obj = {
-            "property": "% Lucro",
+            "property": "Lucro (USD)",
             "number": {"less_than_or_equal_to": 0},
         }
 
@@ -1264,4 +1296,5 @@ def list_investments(
             detail=f"Erro ao consultar investimentos: {e}",
         )
 
-    return [page_to_investment_summary(p) for p in result.get("results", [])]
+    investments = [page_to_investment_summary(p) for p in result.get("results", [])]
+    return QueryInvestmentsResponse(investments=investments)
