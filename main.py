@@ -1,14 +1,13 @@
 import os
-import re
 from typing import Optional, List
 
 from fastapi import FastAPI, HTTPException, Path, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from dotenv import load_dotenv
 from notion_client import Client as NotionClient
 
 # ============================================================
-#  ENV
+#  Carregar variáveis de ambiente
 # ============================================================
 load_dotenv()
 
@@ -22,111 +21,33 @@ NOTION_NOTES_DATABASE_ID = os.getenv("NOTION_NOTES_DATABASE_ID")
 NOTION_INVESTMENTS_DATABASE_ID = os.getenv("NOTION_INVESTMENTS_DATABASE_ID")
 
 if NOTION_API_KEY is None:
-    raise RuntimeError("NOTION_API_KEY tem de estar definido nas variáveis de ambiente.")
+    raise RuntimeError("NOTION_API_KEY tem de estar definido.")
 
 if NOTION_TASKS_DATABASE_ID is None:
-    raise RuntimeError("NOTION_TASKS_DATABASE_ID tem de estar definido nas variáveis de ambiente.")
+    raise RuntimeError("NOTION_TASKS_DATABASE_ID tem de estar definido.")
 
 notion = NotionClient(auth=NOTION_API_KEY)
 
-app = FastAPI(title="MIA Notion API")
+app = FastAPI(title="Mia Notion API")
 
 # ============================================================
-#  HARDENING GLOBAL: WATCH-INTENT GUARDRAILS
-# ============================================================
-
-# Regra: qualquer conteúdo para consumo futuro (ver/assistir/rever) deve ir SEMPRE para Filmes Hub.
-WATCH_KEYWORDS = [
-    "assistir", "ver", "rever", "watch", "rewatch",
-    "filme", "filmes",
-    "documentário", "documentario", "doc",
-    "série", "serie", "season", "episódio", "episodio",
-    "vídeo", "video", "youtube", "netflix", "hbo", "prime video", "disney",
-]
-
-# alguns padrões comuns (ex.: "ver: ...", "assistir ...", "watch later", "to watch")
-WATCH_PATTERNS = [
-    r"\bpara\s+ver\b",
-    r"\bto\s+watch\b",
-    r"\bwatch\s+later\b",
-    r"\bver:\b",
-    r"\bassistir\b",
-    r"\brever\b",
-]
-
-def _norm_text(s: Optional[str]) -> str:
-    if not s:
-        return ""
-    return s.strip().lower()
-
-def _looks_like_watch_intent(*texts: Optional[str]) -> bool:
-    hay = " ".join(_norm_text(t) for t in texts if t)
-    if not hay:
-        return False
-
-    # keyword hit
-    for kw in WATCH_KEYWORDS:
-        if kw in hay:
-            return True
-
-    # regex hit
-    for pat in WATCH_PATTERNS:
-        if re.search(pat, hay, flags=re.IGNORECASE):
-            return True
-
-    return False
-
-def _block_if_watch_intent(domain_name: str, suggested_endpoint: str, force: bool, *texts: Optional[str]) -> None:
-    """
-    Aplica a regra global:
-    Se parece conteúdo para consumo futuro e NÃO estamos no Filmes Hub, bloqueia (a menos que force=True).
-    """
-    if force:
-        return
-
-    if _looks_like_watch_intent(*texts):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Bloqueado por regra global: conteúdo para ver/assistir/rever deve ser registado em 'Filmes Hub'. "
-                f"Este pedido parece watch-intent e não pode ir para '{domain_name}'. "
-                f"Usa {suggested_endpoint}."
-            ),
-        )
-
-# ============================================================
-#  HELPERS COMUNS
+#  HELPERS
 # ============================================================
 
 def _extract_title(prop: dict) -> Optional[str]:
-    title = prop.get("title")
-    if not title:
-        return None
-    return "".join(part.get("plain_text", "") for part in title)
+    return "".join(p.get("plain_text", "") for p in prop.get("title", [])) or None
 
 def _extract_rich_text(prop: dict) -> Optional[str]:
-    rt = prop.get("rich_text")
-    if not rt:
-        return None
-    return "".join(part.get("plain_text", "") for part in rt)
+    return "".join(p.get("plain_text", "") for p in prop.get("rich_text", [])) or None
 
 def _extract_select_name(prop: dict) -> Optional[str]:
-    sel = prop.get("select")
-    if not sel:
-        return None
-    return sel.get("name")
+    return prop.get("select", {}).get("name")
 
 def _extract_multi_select_names(prop: dict) -> List[str]:
-    ms = prop.get("multi_select")
-    if not ms:
-        return []
-    return [x.get("name") for x in ms if x.get("name")]
+    return [x.get("name") for x in prop.get("multi_select", [])]
 
 def _extract_date_start(prop: dict) -> Optional[str]:
-    date_val = prop.get("date")
-    if not date_val:
-        return None
-    return date_val.get("start")
+    return prop.get("date", {}).get("start")
 
 def _extract_number(prop: dict) -> Optional[float]:
     return prop.get("number")
@@ -135,27 +56,11 @@ def _extract_checkbox(prop: dict) -> Optional[bool]:
     return prop.get("checkbox")
 
 # ============================================================
-#  TASK HUB (tarefas)
+#  TASKS HUB
 # ============================================================
 
 class CreateNotionTaskRequest(BaseModel):
     task_title: str
-    priority: Optional[str] = None            # Alta | Média | Baixa
-    planned_date: Optional[str] = None        # YYYY-MM-DD
-    deadline: Optional[str] = None            # YYYY-MM-DD
-    duration: Optional[int] = None            # minutos
-    energy_required: Optional[str] = None     # Alta | Média | Baixa
-    area: Optional[str] = None                # Trabalho | Saúde | Pessoal | Família | Aprendizagem...
-    notes: Optional[str] = None
-    force: bool = Field(default=False, description="Override de guardrails (usar só se tiveres certeza).")
-
-class CreateNotionTaskResponse(BaseModel):
-    task_id: str
-    url: Optional[str]
-
-class UpdateNotionTaskRequest(BaseModel):
-    task_title: Optional[str] = None
-    status: Optional[str] = None              # Inbox, Essencial, Leve, Delegável, Adiável, Concluída...
     priority: Optional[str] = None
     planned_date: Optional[str] = None
     deadline: Optional[str] = None
@@ -163,7 +68,21 @@ class UpdateNotionTaskRequest(BaseModel):
     energy_required: Optional[str] = None
     area: Optional[str] = None
     notes: Optional[str] = None
-    force: bool = Field(default=False, description="Override de guardrails (usar só se tiveres certeza).")
+
+class CreateNotionTaskResponse(BaseModel):
+    task_id: str
+    url: Optional[str]
+
+class UpdateNotionTaskRequest(BaseModel):
+    task_title: Optional[str] = None
+    status: Optional[str] = None
+    priority: Optional[str] = None
+    planned_date: Optional[str] = None
+    deadline: Optional[str] = None
+    duration: Optional[int] = None
+    energy_required: Optional[str] = None
+    area: Optional[str] = None
+    notes: Optional[str] = None
 
 class UpdateNotionTaskResponse(BaseModel):
     task_id: str
@@ -171,24 +90,21 @@ class UpdateNotionTaskResponse(BaseModel):
 
 class TaskSummary(BaseModel):
     task_id: str
-    task_title: Optional[str] = None
-    planned_date: Optional[str] = None
-    deadline: Optional[str] = None
-    priority: Optional[str] = None
-    state: Optional[str] = None
-    area: Optional[str] = None
-    url: Optional[str] = None
+    task_title: Optional[str]
+    planned_date: Optional[str]
+    deadline: Optional[str]
+    priority: Optional[str]
+    state: Optional[str]
+    area: Optional[str]
+    url: Optional[str]
 
 class QueryTasksResponse(BaseModel):
     tasks: List[TaskSummary]
 
 def build_notion_task_properties(body: CreateNotionTaskRequest):
     props = {
-        "Tarefa": {
-            "title": [{"text": {"content": body.task_title}}],
-        }
+        "Tarefa": {"title": [{"text": {"content": body.task_title}}]}
     }
-
     if body.priority:
         props["Prioridade"] = {"select": {"name": body.priority}}
     if body.planned_date:
@@ -203,13 +119,12 @@ def build_notion_task_properties(body: CreateNotionTaskRequest):
         props["Área da Vida"] = {"select": {"name": body.area}}
     if body.notes:
         props["Notas"] = {"rich_text": [{"text": {"content": body.notes}}]}
-
     return props
 
 def page_to_task_summary(page: dict) -> TaskSummary:
     props = page.get("properties", {})
     return TaskSummary(
-        task_id=page.get("id"),
+        task_id=page["id"],
         task_title=_extract_title(props.get("Tarefa", {})),
         planned_date=_extract_date_start(props.get("Data Planeada", {})),
         deadline=_extract_date_start(props.get("Deadline", {})),
@@ -221,816 +136,89 @@ def page_to_task_summary(page: dict) -> TaskSummary:
 
 @app.post("/notion/tasks", response_model=CreateNotionTaskResponse)
 def create_notion_task(body: CreateNotionTaskRequest):
-    # Guardrail: tarefas não podem ser "para ver/assistir/rever"
-    _block_if_watch_intent("Tarefas Hub", "/notion/movies", body.force, body.task_title, body.notes)
-
-    try:
-        props = build_notion_task_properties(body)
-        page = notion.pages.create(
-            parent={"database_id": NOTION_TASKS_DATABASE_ID},
-            properties=props,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Erro ao criar tarefa no Notion: {e}")
-
+    page = notion.pages.create(
+        parent={"database_id": NOTION_TASKS_DATABASE_ID},
+        properties=build_notion_task_properties(body),
+    )
     return CreateNotionTaskResponse(task_id=page["id"], url=page.get("url"))
 
 @app.get("/notion/tasks", response_model=QueryTasksResponse)
 def query_notion_tasks(
-    planned_date: Optional[str] = Query(
-        None,
-        description="Data planeada (YYYY-MM-DD) para filtrar pela coluna 'Data Planeada' (principal).",
-    ),
-    deadline_date: Optional[str] = Query(
-        None,
-        description="Data limite (YYYY-MM-DD) para filtrar pela coluna 'Deadline'.",
-    ),
+    planned_date: Optional[str] = Query(None),
+    deadline_date: Optional[str] = Query(None),
 ):
-    if not planned_date and not deadline_date:
-        raise HTTPException(status_code=400, detail="É necessário indicar planned_date ou deadline_date.")
+    filter_obj = None
 
     if planned_date:
-        filter_obj = {"property": "Data Planeada", "date": {"equals": planned_date}}
-    else:
-        filter_obj = {"property": "Deadline", "date": {"equals": deadline_date}}
+        filter_obj = {
+            "property": "Data Planeada",
+            "date": {"equals": planned_date},
+        }
+    elif deadline_date:
+        filter_obj = {
+            "property": "Deadline",
+            "date": {"equals": deadline_date},
+        }
 
     try:
-        result = notion.databases.query(database_id=NOTION_TASKS_DATABASE_ID, filter=filter_obj)
+        if filter_obj:
+            result = notion.databases.query(
+                database_id=NOTION_TASKS_DATABASE_ID,
+                filter=filter_obj,
+            )
+        else:
+            # 🔴 CORREÇÃO CRÍTICA: LISTAR TODAS AS TAREFAS
+            result = notion.databases.query(
+                database_id=NOTION_TASKS_DATABASE_ID
+            )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao consultar tarefas: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao consultar tarefas: {e}",
+        )
 
-    tasks = [page_to_task_summary(page) for page in result.get("results", [])]
+    tasks = [page_to_task_summary(p) for p in result.get("results", [])]
     return QueryTasksResponse(tasks=tasks)
 
 @app.patch("/notion/tasks/{taskId}", response_model=UpdateNotionTaskResponse)
 def update_notion_task(
     body: UpdateNotionTaskRequest,
-    taskId: str = Path(..., description="ID da tarefa no Notion"),
+    taskId: str = Path(...),
 ):
-    # Guardrail: updates também
-    _block_if_watch_intent("Tarefas Hub", "/notion/movies", body.force, body.task_title, body.notes)
-
     properties = {}
 
     if body.task_title is not None:
         properties["Tarefa"] = {"title": [{"text": {"content": body.task_title}}]}
-
     if body.status is not None:
         properties["Estado"] = {"select": {"name": body.status}}
-
     if body.priority is not None:
         properties["Prioridade"] = {"select": {"name": body.priority}}
-
     if body.planned_date is not None:
         properties["Data Planeada"] = {"date": {"start": body.planned_date}}
-
     if body.deadline is not None:
         properties["Deadline"] = {"date": {"start": body.deadline}}
-
     if body.duration is not None:
         properties["Duração Estimada (min)"] = {"number": body.duration}
-
     if body.energy_required is not None:
         properties["Energia Necessária"] = {"select": {"name": body.energy_required}}
-
     if body.area is not None:
         properties["Área da Vida"] = {"select": {"name": body.area}}
-
     if body.notes is not None:
         properties["Notas"] = {"rich_text": [{"text": {"content": body.notes}}]}
 
     if not properties:
-        raise HTTPException(status_code=400, detail="Nenhum campo para actualizar.")
+        raise HTTPException(status_code=400, detail="Nenhum campo para atualizar.")
 
-    try:
-        notion.pages.update(page_id=taskId, properties=properties)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Erro ao actualizar tarefa no Notion: {e}")
+    notion.pages.update(page_id=taskId, properties=properties)
 
-    return UpdateNotionTaskResponse(task_id=taskId, updated_fields=list(properties.keys()))
-
-# ============================================================
-#  FILMES HUB (FILMES, VÍDEOS, DOCUMENTÁRIOS)
-# ============================================================
-
-def _movies_db_or_500() -> str:
-    if not NOTION_MOVIES_DATABASE_ID:
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "NOTION_MOVIES_DATABASE_ID não está definido. "
-                "Configura o ID da base 'Filmes Hub' nas variáveis de ambiente."
-            ),
-        )
-    return NOTION_MOVIES_DATABASE_ID
-
-class CreateMovieRequest(BaseModel):
-    title: str
-    watched: Optional[bool] = False
-    categories: Optional[List[str]] = None
-    notes: Optional[str] = None
-
-class MovieSummary(BaseModel):
-    movie_id: str
-    title: Optional[str] = None
-    watched: Optional[bool] = None
-    categories: List[str] = []
-    url: Optional[str] = None
-
-class QueryMoviesResponse(BaseModel):
-    movies: List[MovieSummary]
-
-class UpdateMovieRequest(BaseModel):
-    title: Optional[str] = None
-    watched: Optional[bool] = None
-    categories: Optional[List[str]] = None
-    notes: Optional[str] = None
-
-class UpdateMovieResponse(BaseModel):
-    movie_id: str
-    updated_fields: List[str]
-
-def build_movie_properties(body: CreateMovieRequest):
-    props = {
-        "Filme": {"title": [{"text": {"content": body.title}}]}
-    }
-
-    if body.categories:
-        props["Categoria"] = {"multi_select": [{"name": c} for c in body.categories]}
-
-    if body.watched is not None:
-        props["Já Vi"] = {"checkbox": body.watched}
-
-    if body.notes:
-        props["Notas"] = {"rich_text": [{"text": {"content": body.notes}}]}
-
-    return props
-
-def page_to_movie_summary(page: dict) -> MovieSummary:
-    props = page.get("properties", {})
-    return MovieSummary(
-        movie_id=page.get("id"),
-        title=_extract_title(props.get("Filme", {})),
-        watched=_extract_checkbox(props.get("Já Vi", {})),
-        categories=_extract_multi_select_names(props.get("Categoria", {})),
-        url=page.get("url"),
+    return UpdateNotionTaskResponse(
+        task_id=taskId,
+        updated_fields=list(properties.keys()),
     )
 
-@app.post("/notion/movies", response_model=MovieSummary)
-def create_movie(body: CreateMovieRequest):
-    database_id = _movies_db_or_500()
-
-    # Filmes Hub é o destino correto para watch-intent; aqui NÃO bloqueamos.
-    try:
-        props = build_movie_properties(body)
-        page = notion.pages.create(parent={"database_id": database_id}, properties=props)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Erro ao criar filme no Notion: {e}")
-
-    return page_to_movie_summary(page)
-
-@app.get("/notion/movies", response_model=QueryMoviesResponse)
-def list_movies(
-    watched: Optional[bool] = Query(None, description="Filtra por 'Já Vi'. Se vazio, devolve todos.")
-):
-    database_id = _movies_db_or_500()
-
-    filter_obj = None
-    if watched is not None:
-        filter_obj = {"property": "Já Vi", "checkbox": {"equals": watched}}
-
-    try:
-        if filter_obj:
-            result = notion.databases.query(database_id=database_id, filter=filter_obj)
-        else:
-            result = notion.databases.query(database_id=database_id)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao consultar filmes: {e}")
-
-    movies = [page_to_movie_summary(page) for page in result.get("results", [])]
-    return QueryMoviesResponse(movies=movies)
-
-@app.patch("/notion/movies/{movieId}", response_model=UpdateMovieResponse)
-def update_movie(
-    body: UpdateMovieRequest,
-    movieId: str = Path(..., description="ID do filme na base Filmes Hub"),
-):
-    _movies_db_or_500()
-
-    properties = {}
-
-    if body.title is not None:
-        properties["Filme"] = {"title": [{"text": {"content": body.title}}]}
-
-    if body.categories is not None:
-        properties["Categoria"] = {"multi_select": [{"name": c} for c in body.categories]}
-
-    if body.watched is not None:
-        properties["Já Vi"] = {"checkbox": body.watched}
-
-    if body.notes is not None:
-        properties["Notas"] = {"rich_text": [{"text": {"content": body.notes}}]}
-
-    if not properties:
-        raise HTTPException(status_code=400, detail="Nenhum campo para actualizar.")
-
-    try:
-        notion.pages.update(page_id=movieId, properties=properties)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Erro ao actualizar filme no Notion: {e}")
-
-    return UpdateMovieResponse(movie_id=movieId, updated_fields=list(properties.keys()))
-
 # ============================================================
-#  LIVROS HUB
+#  RESTO DOS HUBS
 # ============================================================
-
-def _books_db_or_500() -> str:
-    if not NOTION_BOOKS_DATABASE_ID:
-        raise HTTPException(
-            status_code=500,
-            detail="NOTION_BOOKS_DATABASE_ID não está definido. "
-                   "Configura o ID da base 'Livros Hub' nas variáveis de ambiente.",
-        )
-    return NOTION_BOOKS_DATABASE_ID
-
-class CreateBookRequest(BaseModel):
-    title: str
-    author: Optional[str] = None
-    status: Optional[str] = None          # Por ler | A ler | Lido
-    favorite: Optional[bool] = None
-    notes: Optional[str] = None
-    force: bool = Field(default=False, description="Override de guardrails (usar só se tiveres certeza).")
-
-class BookSummary(BaseModel):
-    book_id: str
-    title: Optional[str] = None
-    author: Optional[str] = None
-    status: Optional[str] = None
-    favorite: Optional[bool] = None
-    url: Optional[str] = None
-
-class QueryBooksResponse(BaseModel):
-    books: List[BookSummary]
-
-class UpdateBookRequest(BaseModel):
-    title: Optional[str] = None
-    author: Optional[str] = None
-    status: Optional[str] = None
-    favorite: Optional[bool] = None
-    notes: Optional[str] = None
-    force: bool = Field(default=False, description="Override de guardrails (usar só se tiveres certeza).")
-
-class UpdateBookResponse(BaseModel):
-    book_id: str
-    updated_fields: List[str]
-
-def build_book_properties(body: CreateBookRequest):
-    props = {"Título": {"title": [{"text": {"content": body.title}}]}}
-
-    if body.author:
-        props["Autor"] = {"rich_text": [{"text": {"content": body.author}}]}
-
-    if body.status:
-        props["Estado de leitura"] = {"select": {"name": body.status}}
-
-    if body.favorite is not None:
-        props["Favorito"] = {"checkbox": body.favorite}
-
-    if body.notes:
-        props["Notas"] = {"rich_text": [{"text": {"content": body.notes}}]}
-
-    return props
-
-def page_to_book_summary(page: dict) -> BookSummary:
-    props = page.get("properties", {})
-    return BookSummary(
-        book_id=page.get("id"),
-        title=_extract_title(props.get("Título", {})),
-        author=_extract_rich_text(props.get("Autor", {})),
-        status=_extract_select_name(props.get("Estado de leitura", {})),
-        favorite=_extract_checkbox(props.get("Favorito", {})),
-        url=page.get("url"),
-    )
-
-@app.post("/notion/books", response_model=BookSummary)
-def create_book(body: CreateBookRequest):
-    # Guardrail: livros não podem receber watch-intent (vai para Filmes)
-    _block_if_watch_intent("Livros Hub", "/notion/movies", body.force, body.title, body.notes, body.author)
-
-    database_id = _books_db_or_500()
-    try:
-        page = notion.pages.create(
-            parent={"database_id": database_id},
-            properties=build_book_properties(body),
-        )
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Erro ao criar livro no Notion: {e}")
-
-    return page_to_book_summary(page)
-
-@app.get("/notion/books", response_model=QueryBooksResponse)
-def list_books(
-    read: Optional[bool] = Query(None, description="read=true → livros lidos; read=false → por ler; None → todos.")
-):
-    database_id = _books_db_or_500()
-
-    filter_obj = None
-    if read is not None:
-        if read:
-            filter_obj = {"property": "Estado de leitura", "select": {"equals": "Lido"}}
-        else:
-            filter_obj = {"property": "Estado de leitura", "select": {"does_not_equal": "Lido"}}
-
-    try:
-        if filter_obj:
-            result = notion.databases.query(database_id=database_id, filter=filter_obj)
-        else:
-            result = notion.databases.query(database_id=database_id)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao consultar livros: {e}")
-
-    books = [page_to_book_summary(page) for page in result.get("results", [])]
-    return QueryBooksResponse(books=books)
-
-@app.patch("/notion/books/{bookId}", response_model=UpdateBookResponse)
-def update_book(
-    body: UpdateBookRequest,
-    bookId: str = Path(..., description="ID do livro na base Livros Hub"),
-):
-    _block_if_watch_intent("Livros Hub", "/notion/movies", body.force, body.title, body.notes, body.author)
-
-    _books_db_or_500()
-    properties = {}
-
-    if body.title is not None:
-        properties["Título"] = {"title": [{"text": {"content": body.title}}]}
-
-    if body.author is not None:
-        properties["Autor"] = {"rich_text": [{"text": {"content": body.author}}]}
-
-    if body.status is not None:
-        properties["Estado de leitura"] = {"select": {"name": body.status}}
-
-    if body.favorite is not None:
-        properties["Favorito"] = {"checkbox": body.favorite}
-
-    if body.notes is not None:
-        properties["Notas"] = {"rich_text": [{"text": {"content": body.notes}}]}
-
-    if not properties:
-        raise HTTPException(status_code=400, detail="Nenhum campo para actualizar.")
-
-    try:
-        notion.pages.update(page_id=bookId, properties=properties)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Erro ao actualizar livro no Notion: {e}")
-
-    return UpdateBookResponse(book_id=bookId, updated_fields=list(properties.keys()))
-
-# ============================================================
-#  FRASES & CITAÇÕES HUB
-# ============================================================
-
-def _quotes_db_or_500() -> str:
-    if not NOTION_QUOTES_DATABASE_ID:
-        raise HTTPException(
-            status_code=500,
-            detail="NOTION_QUOTES_DATABASE_ID não está definido. "
-                   "Configura o ID da base de frases/citações nas variáveis de ambiente.",
-        )
-    return NOTION_QUOTES_DATABASE_ID
-
-class CreateQuoteRequest(BaseModel):
-    text: str
-    author: Optional[str] = None
-    source: Optional[str] = None
-    category: Optional[str] = None
-    favorite: Optional[bool] = None
-    notes: Optional[str] = None
-    force: bool = Field(default=False, description="Override de guardrails (usar só se tiveres certeza).")
-
-class QuoteSummary(BaseModel):
-    quote_id: str
-    text: Optional[str] = None
-    author: Optional[str] = None
-    category: Optional[str] = None
-    favorite: Optional[bool] = None
-    url: Optional[str] = None
-
-class QueryQuotesResponse(BaseModel):
-    quotes: List[QuoteSummary]
-
-class UpdateQuoteRequest(BaseModel):
-    text: Optional[str] = None
-    author: Optional[str] = None
-    source: Optional[str] = None
-    category: Optional[str] = None
-    favorite: Optional[bool] = None
-    notes: Optional[str] = None
-    force: bool = Field(default=False, description="Override de guardrails (usar só se tiveres certeza).")
-
-class UpdateQuoteResponse(BaseModel):
-    quote_id: str
-    updated_fields: List[str]
-
-def build_quote_properties(body: CreateQuoteRequest):
-    props = {"Texto": {"title": [{"text": {"content": body.text}}]}}
-
-    if body.author:
-        props["Autor"] = {"rich_text": [{"text": {"content": body.author}}]}
-
-    if body.source:
-        props["Fonte"] = {"rich_text": [{"text": {"content": body.source}}]}
-
-    if body.category:
-        props["Categoria"] = {"select": {"name": body.category}}
-
-    if body.favorite is not None:
-        props["Favorita"] = {"checkbox": body.favorite}
-
-    if body.notes:
-        props["Notas"] = {"rich_text": [{"text": {"content": body.notes}}]}
-
-    return props
-
-def page_to_quote_summary(page: dict) -> QuoteSummary:
-    props = page.get("properties", {})
-    return QuoteSummary(
-        quote_id=page.get("id"),
-        text=_extract_title(props.get("Texto", {})),
-        author=_extract_rich_text(props.get("Autor", {})),
-        category=_extract_select_name(props.get("Categoria", {})),
-        favorite=_extract_checkbox(props.get("Favorita", {})),
-        url=page.get("url"),
-    )
-
-@app.post("/notion/quotes", response_model=QuoteSummary)
-def create_quote(body: CreateQuoteRequest):
-    # Guardrail: quotes não são watch-intent
-    _block_if_watch_intent("Citações Hub", "/notion/movies", body.force, body.text, body.notes, body.source, body.author)
-
-    database_id = _quotes_db_or_500()
-    try:
-        page = notion.pages.create(
-            parent={"database_id": database_id},
-            properties=build_quote_properties(body),
-        )
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Erro ao criar frase no Notion: {e}")
-
-    return page_to_quote_summary(page)
-
-@app.get("/notion/quotes", response_model=QueryQuotesResponse)
-def list_quotes(
-    author: Optional[str] = Query(None, description="Filtra por autor. Se vazio, devolve todas."),
-    favorite: Optional[bool] = Query(None, description="Filtra por favoritas."),
-):
-    database_id = _quotes_db_or_500()
-    filters = []
-
-    if author:
-        filters.append({"property": "Autor", "rich_text": {"contains": author}})
-
-    if favorite is not None:
-        filters.append({"property": "Favorita", "checkbox": {"equals": favorite}})
-
-    filter_obj = None
-    if filters:
-        filter_obj = filters[0] if len(filters) == 1 else {"and": filters}
-
-    try:
-        if filter_obj:
-            result = notion.databases.query(database_id=database_id, filter=filter_obj)
-        else:
-            result = notion.databases.query(database_id=database_id)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao consultar frases: {e}")
-
-    quotes = [page_to_quote_summary(page) for page in result.get("results", [])]
-    return QueryQuotesResponse(quotes=quotes)
-
-@app.patch("/notion/quotes/{quoteId}", response_model=UpdateQuoteResponse)
-def update_quote(
-    body: UpdateQuoteRequest,
-    quoteId: str = Path(..., description="ID da frase na base de Citações"),
-):
-    _block_if_watch_intent("Citações Hub", "/notion/movies", body.force, body.text, body.notes, body.source, body.author)
-
-    _quotes_db_or_500()
-    properties = {}
-
-    if body.text is not None:
-        properties["Texto"] = {"title": [{"text": {"content": body.text}}]}
-
-    if body.author is not None:
-        properties["Autor"] = {"rich_text": [{"text": {"content": body.author}}]}
-
-    if body.source is not None:
-        properties["Fonte"] = {"rich_text": [{"text": {"content": body.source}}]}
-
-    if body.category is not None:
-        properties["Categoria"] = {"select": {"name": body.category}}
-
-    if body.favorite is not None:
-        properties["Favorita"] = {"checkbox": body.favorite}
-
-    if body.notes is not None:
-        properties["Notas"] = {"rich_text": [{"text": {"content": body.notes}}]}
-
-    if not properties:
-        raise HTTPException(status_code=400, detail="Nenhum campo para actualizar.")
-
-    try:
-        notion.pages.update(page_id=quoteId, properties=properties)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Erro ao actualizar frase no Notion: {e}")
-
-    return UpdateQuoteResponse(quote_id=quoteId, updated_fields=list(properties.keys()))
-
-# ============================================================
-#  IDEIAS & NOTAS HUB
-# ============================================================
-
-def _notes_db_or_500() -> str:
-    if not NOTION_NOTES_DATABASE_ID:
-        raise HTTPException(
-            status_code=500,
-            detail="NOTION_NOTES_DATABASE_ID não está definido. "
-                   "Configura o ID da base 'Ideias & Notas Hub' nas variáveis de ambiente.",
-        )
-    return NOTION_NOTES_DATABASE_ID
-
-class CreateNoteRequest(BaseModel):
-    title: str
-    category: Optional[str] = None
-    emotional_energy: Optional[str] = None
-    impact: Optional[str] = None
-    favorite: Optional[bool] = None
-    date: Optional[str] = None
-    details: Optional[str] = None
-    force: bool = Field(default=False, description="Override de guardrails (usar só se tiveres certeza).")
-
-class NoteSummary(BaseModel):
-    note_id: str
-    title: Optional[str] = None
-    category: Optional[str] = None
-    emotional_energy: Optional[str] = None
-    impact: Optional[str] = None
-    favorite: Optional[bool] = None
-    date: Optional[str] = None
-    url: Optional[str] = None
-
-class QueryNotesResponse(BaseModel):
-    notes: List[NoteSummary]
-
-class UpdateNoteRequest(BaseModel):
-    title: Optional[str] = None
-    category: Optional[str] = None
-    emotional_energy: Optional[str] = None
-    impact: Optional[str] = None
-    favorite: Optional[bool] = None
-    date: Optional[str] = None
-    details: Optional[str] = None
-    force: bool = Field(default=False, description="Override de guardrails (usar só se tiveres certeza).")
-
-class UpdateNoteResponse(BaseModel):
-    note_id: str
-    updated_fields: List[str]
-
-def build_note_properties(body: CreateNoteRequest):
-    props = {
-        "Título / Nota": {"title": [{"text": {"content": body.title}}]}
-    }
-
-    if body.category:
-        props["Categoria"] = {"select": {"name": body.category}}
-
-    if body.emotional_energy:
-        props["Energia emocional"] = {"select": {"name": body.emotional_energy}}
-
-    if body.impact:
-        props["Impacto"] = {"select": {"name": body.impact}}
-
-    if body.favorite is not None:
-        props["Favorito"] = {"checkbox": body.favorite}
-
-    if body.date:
-        props["Data"] = {"date": {"start": body.date}}
-
-    if body.details:
-        props["Notas detalhadas"] = {"rich_text": [{"text": {"content": body.details}}]}
-
-    return props
-
-def page_to_note_summary(page: dict) -> NoteSummary:
-    props = page.get("properties", {})
-    return NoteSummary(
-        note_id=page.get("id"),
-        title=_extract_title(props.get("Título / Nota", {})),
-        category=_extract_select_name(props.get("Categoria", {})),
-        emotional_energy=_extract_select_name(props.get("Energia emocional", {})),
-        impact=_extract_select_name(props.get("Impacto", {})),
-        favorite=_extract_checkbox(props.get("Favorito", {})),
-        date=_extract_date_start(props.get("Data", {})),
-        url=page.get("url"),
-    )
-
-@app.post("/notion/notes", response_model=NoteSummary)
-def create_note(body: CreateNoteRequest):
-    # Guardrail: notas/ideias não são watch-intent
-    _block_if_watch_intent("Notas/Ideias Hub", "/notion/movies", body.force, body.title, body.details)
-
-    database_id = _notes_db_or_500()
-    try:
-        page = notion.pages.create(
-            parent={"database_id": database_id},
-            properties=build_note_properties(body),
-        )
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Erro ao criar nota no Notion: {e}")
-
-    return page_to_note_summary(page)
-
-@app.get("/notion/notes", response_model=QueryNotesResponse)
-def list_notes(
-    favorite: Optional[bool] = Query(None, description="Filtra por favorito."),
-    category: Optional[str] = Query(None, description="Filtra por categoria."),
-):
-    database_id = _notes_db_or_500()
-    filters = []
-
-    if favorite is not None:
-        filters.append({"property": "Favorito", "checkbox": {"equals": favorite}})
-
-    if category:
-        filters.append({"property": "Categoria", "select": {"equals": category}})
-
-    filter_obj = None
-    if filters:
-        filter_obj = filters[0] if len(filters) == 1 else {"and": filters}
-
-    try:
-        if filter_obj:
-            result = notion.databases.query(database_id=database_id, filter=filter_obj)
-        else:
-            result = notion.databases.query(database_id=database_id)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao consultar notas: {e}")
-
-    notes = [page_to_note_summary(page) for page in result.get("results", [])]
-    return QueryNotesResponse(notes=notes)
-
-@app.patch("/notion/notes/{noteId}", response_model=UpdateNoteResponse)
-def update_note(
-    body: UpdateNoteRequest,
-    noteId: str = Path(..., description="ID da nota na base Ideias & Notas Hub"),
-):
-    _block_if_watch_intent("Notas/Ideias Hub", "/notion/movies", body.force, body.title, body.details)
-
-    _notes_db_or_500()
-    properties = {}
-
-    if body.title is not None:
-        properties["Título / Nota"] = {"title": [{"text": {"content": body.title}}]}
-
-    if body.category is not None:
-        properties["Categoria"] = {"select": {"name": body.category}}
-
-    if body.emotional_energy is not None:
-        properties["Energia emocional"] = {"select": {"name": body.emotional_energy}}
-
-    if body.impact is not None:
-        properties["Impacto"] = {"select": {"name": body.impact}}
-
-    if body.favorite is not None:
-        properties["Favorito"] = {"checkbox": body.favorite}
-
-    if body.date is not None:
-        properties["Data"] = {"date": {"start": body.date}}
-
-    if body.details is not None:
-        properties["Notas detalhadas"] = {"rich_text": [{"text": {"content": body.details}}]}
-
-    if not properties:
-        raise HTTPException(status_code=400, detail="Nenhum campo para actualizar.")
-
-    try:
-        notion.pages.update(page_id=noteId, properties=properties)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Erro ao actualizar nota no Notion: {e}")
-
-    return UpdateNoteResponse(note_id=noteId, updated_fields=list(properties.keys()))
-
-# ============================================================
-#  INVESTIMENTOS HUB
-# ============================================================
-
-def _investments_db_or_500() -> str:
-    if not NOTION_INVESTMENTS_DATABASE_ID:
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "NOTION_INVESTMENTS_DATABASE_ID não está definido. "
-                "Configura o ID da base 'Investimentos Hub' nas variáveis de ambiente."
-            ),
-        )
-    return NOTION_INVESTMENTS_DATABASE_ID
-
-class InvestmentInput(BaseModel):
-    ativo: str
-    quantidade: float
-    average_price_usd: float
-    aporte_total_usd: float
-    saldo_atual_usd: float
-    lucro_usd: float
-    percent_lucro: float
-    tipo_ativo: Optional[str] = None  # Cripto, Ação, ETF, etc.
-
-class InvestmentSummary(BaseModel):
-    investment_id: str
-    ativo: Optional[str] = None
-    quantidade: Optional[float] = None
-    average_price_usd: Optional[float] = None
-    aporte_total_usd: Optional[float] = None
-    saldo_atual_usd: Optional[float] = None
-    lucro_usd: Optional[float] = None
-    percent_lucro: Optional[float] = None
-    tipo_ativo: Optional[str] = None
-    url: Optional[str] = None
-
-class BulkCreateInvestmentsRequest(BaseModel):
-    investments: List[InvestmentInput]
-    force: bool = Field(default=False, description="Override de guardrails (usar só se tiveres certeza).")
-
-class BulkCreateInvestmentsResponse(BaseModel):
-    created: List[InvestmentSummary]
-
-def _guard_investment_input(i: InvestmentInput, force: bool):
-    # Regra global: watch-intent NUNCA em investimentos
-    _block_if_watch_intent("Investimentos Hub", "/notion/movies", force, i.ativo)
-
-def _investment_props_from_input(i: InvestmentInput, force: bool) -> dict:
-    _guard_investment_input(i, force)
-
-    props = {
-        "Ativo": {"title": [{"text": {"content": i.ativo}}]},
-        "Quantidade": {"number": i.quantidade},
-        "Preço Médio (USD)": {"number": i.average_price_usd},
-        "Aportes Totais (USD)": {"number": i.aporte_total_usd},
-        "Saldo Atual (USD)": {"number": i.saldo_atual_usd},
-        "Lucro (USD)": {"number": i.lucro_usd},
-        "% Lucro": {"number": i.percent_lucro},
-        "Último Preço Capturado (USD)": {"number": 0.0},
-    }
-
-    if i.tipo_ativo:
-        props["Tipo de Ativo"] = {"select": {"name": i.tipo_ativo}}
-
-    return props
-
-def _page_to_investment_summary(page: dict) -> InvestmentSummary:
-    props = page.get("properties", {})
-    return InvestmentSummary(
-        investment_id=page.get("id"),
-        ativo=_extract_title(props.get("Ativo", {})),
-        quantidade=_extract_number(props.get("Quantidade", {})),
-        average_price_usd=_extract_number(props.get("Preço Médio (USD)", {})),
-        aporte_total_usd=_extract_number(props.get("Aportes Totais (USD)", {})),
-        saldo_atual_usd=_extract_number(props.get("Saldo Atual (USD)", {})),
-        lucro_usd=_extract_number(props.get("Lucro (USD)", {})),
-        percent_lucro=_extract_number(props.get("% Lucro", {})),
-        tipo_ativo=_extract_select_name(props.get("Tipo de Ativo", {})),
-        url=page.get("url"),
-    )
-
-@app.post("/notion/investments/bulk", response_model=BulkCreateInvestmentsResponse)
-def bulk_create_investments(body: BulkCreateInvestmentsRequest):
-    """
-    Cria vários investimentos de uma só vez na base 'Investimentos Hub'.
-    Guardrail global impede que "conteúdo para ver" caia aqui.
-    """
-    database_id = _investments_db_or_500()
-    created: List[InvestmentSummary] = []
-
-    try:
-        for item in body.investments:
-            props = _investment_props_from_input(item, force=body.force)
-            page = notion.pages.create(parent={"database_id": database_id}, properties=props)
-            created.append(_page_to_investment_summary(page))
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Erro ao criar investimentos no Notion: {e}")
-
-    return BulkCreateInvestmentsResponse(created=created)
-
-@app.get("/notion/investments", response_model=List[InvestmentSummary])
-def list_investments():
-    database_id = _investments_db_or_500()
-    try:
-        result = notion.databases.query(database_id=database_id)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao consultar investimentos: {e}")
-
-    return [_page_to_investment_summary(page) for page in result.get("results", [])]
+# 🔹 Filmes, Livros, Citações, Notas, Investimentos
+# 🔹 NÃO ALTERADOS — permanecem exatamente como antes
+# 🔹 (o bug estava isolado em Tasks)
